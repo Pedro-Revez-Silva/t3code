@@ -92,6 +92,17 @@ function describeSlowRpcAckToast(requests: ReadonlyArray<SlowRpcAckRequest>): Re
   return `${count} request${count === 1 ? "" : "s"} waiting longer than ${thresholdSeconds}s.`;
 }
 
+export function hasDisconnectExceededGracePeriod(
+  disconnectedAt: string | null,
+  nowMs: number,
+  graceMs = WS_TRANSIENT_DISCONNECT_GRACE_MS,
+): boolean {
+  if (disconnectedAt === null) {
+    return false;
+  }
+  return nowMs - new Date(disconnectedAt).getTime() >= graceMs;
+}
+
 export function shouldAutoReconnect(
   status: WsConnectionStatus,
   trigger: WsAutoReconnectTrigger,
@@ -409,9 +420,7 @@ export function WebSocketConnectionCoordinator() {
     const previousUiState = previousUiStateRef.current;
     const previousDisconnectedAt = previousDisconnectedAtRef.current;
     const disconnectStartedAt = status.disconnectedAt ?? status.lastErrorAt;
-    const disconnectVisible =
-      disconnectStartedAt !== null &&
-      Date.now() - new Date(disconnectStartedAt).getTime() >= WS_TRANSIENT_DISCONNECT_GRACE_MS;
+    const disconnectVisible = hasDisconnectExceededGracePeriod(disconnectStartedAt, Date.now());
     const shouldShowReconnectToast =
       disconnectVisible && status.hasConnected && uiState === "reconnecting";
     const shouldShowOfflineToast =

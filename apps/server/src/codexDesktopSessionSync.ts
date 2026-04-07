@@ -435,6 +435,14 @@ function resolveCodexHomePath(homePath: string): string {
   return process.env.CODEX_HOME || join(os.homedir(), ".codex");
 }
 
+export const codexDesktopSessionSyncTestExports = {
+  appendSessionIndexUpdates,
+  maxIsoTimestamp,
+  parseSessionFile,
+  parseSessionIndex,
+  resolveCodexHomePath,
+};
+
 export const launchCodexDesktopSessionSync: Effect.Effect<
   void,
   never,

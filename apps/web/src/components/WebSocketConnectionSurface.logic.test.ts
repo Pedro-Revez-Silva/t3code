@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import type { WsConnectionStatus } from "../rpc/wsConnectionState";
-import { shouldAutoReconnect } from "./WebSocketConnectionSurface";
+import {
+  hasDisconnectExceededGracePeriod,
+  shouldAutoReconnect,
+} from "./WebSocketConnectionSurface";
 
 function makeStatus(overrides: Partial<WsConnectionStatus> = {}): WsConnectionStatus {
   return {
@@ -25,6 +28,16 @@ function makeStatus(overrides: Partial<WsConnectionStatus> = {}): WsConnectionSt
 }
 
 describe("WebSocketConnectionSurface.logic", () => {
+  it("hides transient disconnects inside the grace period", () => {
+    expect(
+      hasDisconnectExceededGracePeriod("2026-04-07T20:00:00.000Z", Date.parse("2026-04-07T20:00:02.000Z")),
+    ).toBe(false);
+
+    expect(
+      hasDisconnectExceededGracePeriod("2026-04-07T20:00:00.000Z", Date.parse("2026-04-07T20:00:02.500Z")),
+    ).toBe(true);
+  });
+
   it("forces reconnect on online when the app was offline", () => {
     expect(
       shouldAutoReconnect(
