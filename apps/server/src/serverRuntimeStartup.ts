@@ -28,6 +28,7 @@ import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReac
 import { ServerLifecycleEvents } from "./serverLifecycleEvents";
 import { ServerSettingsService } from "./serverSettings";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService";
+import { launchCodexDesktopSessionSync } from "./codexDesktopSessionSync";
 
 const isWildcardHost = (host: string | undefined): boolean =>
   host === "0.0.0.0" || host === "::" || host === "[::]";
@@ -305,6 +306,9 @@ const makeServerRuntimeStartup = Effect.gen(function* () {
       "reactors.start",
       orchestrationReactor.start().pipe(Scope.provide(reactorScope)),
     );
+
+    yield* Effect.logDebug("startup phase: importing desktop Codex sessions");
+    yield* runStartupPhase("codex.sync.start", launchCodexDesktopSessionSync);
 
     yield* Effect.logDebug("startup phase: preparing welcome payload");
     const welcome = yield* runStartupPhase("welcome.prepare", autoBootstrapWelcome);

@@ -33,6 +33,14 @@ export interface OrchestrationEngineShape {
   readonly getReadModel: () => Effect.Effect<OrchestrationReadModel, never, never>;
 
   /**
+   * Reload the in-memory read model from the current projection snapshot.
+   *
+   * This is used when external processes mutate the projection tables without
+   * going through orchestration command dispatch.
+   */
+  readonly refreshReadModel: () => Effect.Effect<void, never, never>;
+
+  /**
    * Replay persisted orchestration events from an exclusive sequence cursor.
    *
    * @param fromSequenceExclusive - Sequence cursor (exclusive).

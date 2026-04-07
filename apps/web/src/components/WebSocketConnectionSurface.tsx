@@ -19,6 +19,7 @@ import { toastManager } from "./ui/toast";
 import { getWsRpcClient } from "~/wsRpcClient";
 
 const FORCED_WS_RECONNECT_DEBOUNCE_MS = 5_000;
+const WS_TRANSIENT_DISCONNECT_GRACE_MS = 2_500;
 type WsAutoReconnectTrigger = "focus" | "online";
 
 const connectionTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -270,6 +271,7 @@ export function WebSocketConnectionCoordinator() {
   const toastResetTimerRef = useRef<number | null>(null);
   const previousUiStateRef = useRef<WsConnectionUiState>(getWsConnectionUiState(status));
   const previousDisconnectedAtRef = useRef<string | null>(status.disconnectedAt);
+  const previousDisconnectWasVisibleRef = useRef(false);
 
   const runReconnect = useEffectEvent((showFailureToast: boolean) => {
     if (toastResetTimerRef.current !== null) {
@@ -378,11 +380,44 @@ export function WebSocketConnectionCoordinator() {
 
   useEffect(() => {
     const uiState = getWsConnectionUiState(status);
+    if (
+      status.disconnectedAt === null ||
+      uiState === "connected" ||
+      previousDisconnectWasVisibleRef.current
+    ) {
+      return;
+    }
+
+    const disconnectedAtMs = new Date(status.disconnectedAt).getTime();
+    const remainingMs = disconnectedAtMs + WS_TRANSIENT_DISCONNECT_GRACE_MS - Date.now();
+    if (remainingMs <= 0) {
+      setNowMs(Date.now());
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setNowMs(Date.now());
+    }, remainingMs + 1);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [status.disconnectedAt, status.phase, status.reconnectPhase, status.online]);
+
+  useEffect(() => {
+    const uiState = getWsConnectionUiState(status);
     const previousUiState = previousUiStateRef.current;
     const previousDisconnectedAt = previousDisconnectedAtRef.current;
-    const shouldShowReconnectToast = status.hasConnected && uiState === "reconnecting";
-    const shouldShowOfflineToast = uiState === "offline" && status.disconnectedAt !== null;
-    const shouldShowExhaustedToast = status.hasConnected && status.reconnectPhase === "exhausted";
+    const disconnectStartedAt = status.disconnectedAt ?? status.lastErrorAt;
+    const disconnectVisible =
+      disconnectStartedAt !== null &&
+      Date.now() - new Date(disconnectStartedAt).getTime() >= WS_TRANSIENT_DISCONNECT_GRACE_MS;
+    const shouldShowReconnectToast =
+      disconnectVisible && status.hasConnected && uiState === "reconnecting";
+    const shouldShowOfflineToast =
+      disconnectVisible && uiState === "offline" && status.disconnectedAt !== null;
+    const shouldShowExhaustedToast =
+      disconnectVisible && status.hasConnected && status.reconnectPhase === "exhausted";
 
     if (
       toastResetTimerRef.current !== null &&
@@ -439,6 +474,7 @@ export function WebSocketConnectionCoordinator() {
       } else {
         toastIdRef.current = toastManager.add(toastPayload);
       }
+      previousDisconnectWasVisibleRef.current = true;
     } else if (toastIdRef.current) {
       toastManager.close(toastIdRef.current);
       toastIdRef.current = null;
@@ -447,7 +483,8 @@ export function WebSocketConnectionCoordinator() {
     if (
       uiState === "connected" &&
       (previousUiState === "offline" || previousUiState === "reconnecting") &&
-      previousDisconnectedAt !== null
+      previousDisconnectedAt !== null &&
+      previousDisconnectWasVisibleRef.current
     ) {
       const successToast = {
         description: describeRecoveredToast(previousDisconnectedAt, status.connectedAt),
@@ -470,6 +507,10 @@ export function WebSocketConnectionCoordinator() {
         toastIdRef.current = null;
         toastResetTimerRef.current = null;
       }, 8_250);
+    }
+
+    if (uiState === "connected") {
+      previousDisconnectWasVisibleRef.current = false;
     }
 
     previousUiStateRef.current = uiState;

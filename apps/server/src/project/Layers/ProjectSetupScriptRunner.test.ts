@@ -43,6 +43,7 @@ describe("ProjectSetupScriptRunner", () => {
             Layer.provideMerge(
               Layer.succeed(OrchestrationEngineService, {
                 getReadModel: () => Effect.succeed(emptySnapshot([])),
+                refreshReadModel: () => Effect.void,
                 readEvents: () => Stream.empty,
                 dispatch: () => Effect.die(new Error("unused")),
                 streamDomainEvents: Stream.empty,
@@ -111,6 +112,7 @@ describe("ProjectSetupScriptRunner", () => {
                       },
                     ]),
                   ),
+                refreshReadModel: () => Effect.void,
                 readEvents: () => Stream.empty,
                 dispatch: () => Effect.die(new Error("unused")),
                 streamDomainEvents: Stream.empty,

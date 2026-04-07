@@ -363,6 +363,7 @@ const buildAppUnderTest = (options?: {
       Layer.provide(
         Layer.mock(OrchestrationEngineService)({
           getReadModel: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
+          refreshReadModel: () => Effect.void,
           readEvents: () => Stream.empty,
           dispatch: () => Effect.succeed({ sequence: 0 }),
           streamDomainEvents: Stream.empty,
@@ -2471,6 +2472,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   ...makeDefaultOrchestrationReadModel(),
                   snapshotSequence: 1,
                 }),
+              refreshReadModel: () => Effect.void,
               readEvents: (fromSequenceExclusive) => {
                 replayCursor = fromSequenceExclusive;
                 return Stream.make(makeEvent(2), makeEvent(3));

@@ -200,6 +200,7 @@ function coalesceOrchestrationUiEvents(
 
 const REPLAY_RECOVERY_RETRY_DELAY_MS = 100;
 const MAX_NO_PROGRESS_REPLAY_RETRIES = 3;
+const SNAPSHOT_SYNC_POLL_INTERVAL_MS = 3000;
 
 function ServerStateBootstrap() {
   useEffect(() => startServerStateSync(getWsRpcClient().server), []);
@@ -326,6 +327,7 @@ function EventRouter() {
     let needsProviderInvalidation = false;
     const pendingDomainEvents: OrchestrationEvent[] = [];
     let flushPendingDomainEventsScheduled = false;
+    let lastSnapshotVersion: string | null = null;
 
     const reconcileSnapshotDerivedState = () => {
       const threads = useStore.getState().threads;
@@ -369,6 +371,16 @@ function EventRouter() {
         trailing: true,
       },
     );
+
+    const applySnapshot = (snapshot: Awaited<ReturnType<typeof api.orchestration.getSnapshot>>) => {
+      const nextVersion = `${snapshot.snapshotSequence}:${snapshot.updatedAt}`;
+      if (nextVersion === lastSnapshotVersion) {
+        return;
+      }
+      lastSnapshotVersion = nextVersion;
+      syncServerReadModel(snapshot);
+      reconcileSnapshotDerivedState();
+    };
 
     const applyEventBatch = (events: ReadonlyArray<OrchestrationEvent>) => {
       const nextEvents = recovery.markEventBatchApplied(events);
@@ -511,8 +523,7 @@ function EventRouter() {
       try {
         const snapshot = await api.orchestration.getSnapshot();
         if (!disposed) {
-          syncServerReadModel(snapshot);
-          reconcileSnapshotDerivedState();
+          applySnapshot(snapshot);
           if (recovery.completeSnapshotRecovery(snapshot.snapshotSequence)) {
             void runReplayRecovery("sequence-gap");
           }
@@ -561,6 +572,22 @@ function EventRouter() {
       }
       applyTerminalEvent(event);
     });
+    const snapshotPollInterval = window.setInterval(() => {
+      if (disposed || document.hidden) {
+        return;
+      }
+      void api.orchestration
+        .getSnapshot()
+        .then((snapshot) => {
+          if (disposed) {
+            return;
+          }
+          applySnapshot(snapshot);
+        })
+        .catch(() => {
+          // Keep the current client state and wait for the next poll.
+        });
+    }, SNAPSHOT_SYNC_POLL_INTERVAL_MS);
     return () => {
       disposed = true;
       disposedRef.current = true;
@@ -570,6 +597,7 @@ function EventRouter() {
       queryInvalidationThrottler.cancel();
       unsubDomainEvent();
       unsubTerminalEvent();
+      window.clearInterval(snapshotPollInterval);
     };
   }, [
     applyOrchestrationEvents,

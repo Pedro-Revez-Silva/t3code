@@ -233,6 +233,90 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("refreshes the in-memory read model from the latest projection snapshot", async () => {
+    const snapshots = [
+      {
+        snapshotSequence: 1,
+        updatedAt: "2026-03-03T00:00:04.000Z",
+        projects: [],
+        threads: [],
+      },
+      {
+        snapshotSequence: 2,
+        updatedAt: "2026-03-03T00:00:05.000Z",
+        projects: [
+          {
+            id: asProjectId("project-refreshed"),
+            title: "Refreshed Project",
+            workspaceRoot: "/tmp/refreshed",
+            defaultModelSelection: {
+              provider: "codex" as const,
+              model: "gpt-5-codex",
+            },
+            scripts: [],
+            createdAt: "2026-03-03T00:00:00.000Z",
+            updatedAt: "2026-03-03T00:00:01.000Z",
+            deletedAt: null,
+          },
+        ],
+        threads: [],
+      },
+    ] as const;
+    let snapshotIndex = 0;
+
+    const layer = OrchestrationEngineLive.pipe(
+      Layer.provide(
+        Layer.succeed(ProjectionSnapshotQuery, {
+          getSnapshot: () => Effect.succeed(snapshots[snapshotIndex]!),
+          getCounts: () =>
+            Effect.succeed({
+              projectCount: snapshots[snapshotIndex]!.projects.length,
+              threadCount: snapshots[snapshotIndex]!.threads.length,
+            }),
+          getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+          getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+          getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+        }),
+      ),
+      Layer.provide(
+        Layer.succeed(OrchestrationProjectionPipeline, {
+          bootstrap: Effect.void,
+          projectEvent: () => Effect.void,
+        } satisfies OrchestrationProjectionPipelineShape),
+      ),
+      Layer.provide(
+        Layer.succeed(OrchestrationEventStore, {
+          append: () =>
+            Effect.fail(
+              new PersistenceSqlError({
+                operation: "test.append",
+                detail: "append should not be called during refresh",
+              }),
+            ),
+          readFromSequence: () => Stream.empty,
+          readAll: () => Stream.empty,
+        } satisfies OrchestrationEventStoreShape),
+      ),
+      Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+      Layer.provide(SqlitePersistenceMemory),
+    );
+
+    const runtime = ManagedRuntime.make(layer);
+    const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
+
+    expect((await runtime.runPromise(engine.getReadModel())).projects).toHaveLength(0);
+
+    snapshotIndex = 1;
+    await runtime.runPromise(engine.refreshReadModel());
+
+    const refreshed = await runtime.runPromise(engine.getReadModel());
+    expect(refreshed.snapshotSequence).toBe(2);
+    expect(refreshed.projects).toHaveLength(1);
+    expect(refreshed.projects[0]?.title).toBe("Refreshed Project");
+
+    await runtime.dispose();
+  });
+
   it("archives and unarchives threads through orchestration commands", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;
