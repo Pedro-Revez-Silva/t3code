@@ -153,6 +153,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
       }),
       Effect.provideService(OrchestrationEngineService, {
         getReadModel: () => Effect.die("unused"),
+        refreshReadModel: () => Effect.die("unused"),
         readEvents: () => Stream.empty,
         dispatch: (command) =>
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
@@ -192,6 +193,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
       }),
       Effect.provideService(OrchestrationEngineService, {
         getReadModel: () => Effect.die("unused"),
+        refreshReadModel: () => Effect.die("unused"),
         readEvents: () => Stream.empty,
         dispatch: (command) =>
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(

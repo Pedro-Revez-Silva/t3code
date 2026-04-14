@@ -128,6 +128,16 @@ function hydratePersistedProjectState(parsed: PersistedUiState): void {
   }
 }
 
+export function resetPersistedProjectStateForTests(): void {
+  persistedExpandedProjectCwds.clear();
+  persistedProjectOrderCwds.length = 0;
+  currentProjectCwdById.clear();
+}
+
+export function hydratePersistedProjectStateForTests(parsed: PersistedUiState): void {
+  hydratePersistedProjectState(parsed);
+}
+
 function persistState(state: UiState): void {
   if (typeof window === "undefined") {
     return;
@@ -232,9 +242,7 @@ export function syncProjects(state: UiState, projects: readonly SyncProjectInput
     const expanded =
       previousExpandedById[project.key] ??
       (previousProjectIdForCwd ? previousExpandedById[previousProjectIdForCwd] : undefined) ??
-      (persistedExpandedProjectCwds.size > 0
-        ? persistedExpandedProjectCwds.has(project.cwd)
-        : true);
+      true;
     nextExpandedById[project.key] = expanded;
     return {
       id: project.key,

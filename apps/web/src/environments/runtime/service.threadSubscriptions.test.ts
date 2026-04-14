@@ -15,6 +15,7 @@ const mockCreateWsRpcClient = vi.fn();
 const mockWaitForSavedEnvironmentRegistryHydration = vi.fn();
 const mockListSavedEnvironmentRecords = vi.fn();
 const mockSavedEnvironmentRegistrySubscribe = vi.fn();
+const mockFetch = vi.fn();
 
 function MockWsTransport() {
   return undefined;
@@ -144,6 +145,16 @@ describe("retainThreadDetailSubscription", () => {
     vi.useFakeTimers();
     vi.resetModules();
     vi.clearAllMocks();
+    vi.stubGlobal("fetch", mockFetch);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        snapshotSequence: 1,
+        projects: [],
+        threads: [],
+        updatedAt: "2026-04-13T00:00:00.000Z",
+      }),
+    });
 
     mockThreadUnsubscribe.mockImplementation(() => undefined);
     mockSubscribeThread.mockImplementation(() => mockThreadUnsubscribe);
@@ -169,6 +180,7 @@ describe("retainThreadDetailSubscription", () => {
   afterEach(async () => {
     const { resetEnvironmentServiceForTests } = await import("./service");
     await resetEnvironmentServiceForTests();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 

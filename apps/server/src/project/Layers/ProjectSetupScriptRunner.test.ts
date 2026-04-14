@@ -43,6 +43,7 @@ describe("ProjectSetupScriptRunner", () => {
             Layer.provideMerge(
               Layer.succeed(OrchestrationEngineService, {
                 getReadModel: () => Effect.succeed(emptySnapshot([])),
+                refreshReadModel: () => Effect.succeed(emptySnapshot([])),
                 readEvents: () => Stream.empty,
                 dispatch: () => Effect.die(new Error("unused")),
                 streamDomainEvents: Stream.empty,
@@ -100,6 +101,18 @@ describe("ProjectSetupScriptRunner", () => {
             Layer.provideMerge(
               Layer.succeed(OrchestrationEngineService, {
                 getReadModel: () =>
+                  Effect.succeed(
+                    emptySnapshot([
+                      {
+                        id: "setup",
+                        name: "Setup",
+                        command: "bun install",
+                        icon: "configure",
+                        runOnWorktreeCreate: true,
+                      },
+                    ]),
+                  ),
+                refreshReadModel: () =>
                   Effect.succeed(
                     emptySnapshot([
                       {

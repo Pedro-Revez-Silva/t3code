@@ -62,8 +62,6 @@ import { isLinuxPlatform, isMacPlatform, newCommandId, newProjectId } from "../l
 import {
   selectProjectByRef,
   selectProjectsAcrossEnvironments,
-  selectSidebarThreadsForProjectRef,
-  selectSidebarThreadsForProjectRefs,
   selectSidebarThreadsAcrossEnvironments,
   selectThreadByRef,
   useStore,
@@ -951,6 +949,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 
 interface SidebarProjectItemProps {
   project: SidebarProjectSnapshot;
+  projectThreads: readonly SidebarThreadSummary[];
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
   newThreadShortcutLabel: string | null;
@@ -971,6 +970,7 @@ interface SidebarProjectItemProps {
 const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
   const {
     project,
+    projectThreads,
     isThreadListExpanded,
     activeRouteThreadKey,
     newThreadShortcutLabel,
@@ -1072,62 +1072,21 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       });
     });
   }, []);
-  const sidebarThreads = useStore(
-    useShallow(
-      useMemo(
-        () => (state: import("../store").AppState) =>
-          selectSidebarThreadsForProjectRef(
-            state,
-            scopeProjectRef(project.environmentId, project.id),
-          ),
-        [project.environmentId, project.id],
-      ),
-    ),
-  );
-  // For grouped projects that span multiple environments, also fetch
-  // threads from the other member project refs.
-  const otherMemberRefs = useMemo(
-    () =>
-      project.memberProjectRefs.filter(
-        (ref) => ref.environmentId !== project.environmentId || ref.projectId !== project.id,
-      ),
-    [project.memberProjectRefs, project.environmentId, project.id],
-  );
-  const otherMemberThreads = useStore(
-    useShallow(
-      useMemo(
-        () =>
-          otherMemberRefs.length === 0
-            ? () => [] as SidebarThreadSummary[]
-            : (state: import("../store").AppState) =>
-                selectSidebarThreadsForProjectRefs(state, otherMemberRefs),
-        [otherMemberRefs],
-      ),
-    ),
-  );
-  const allSidebarThreads = useMemo(
-    () =>
-      otherMemberThreads.length === 0 ? sidebarThreads : [...sidebarThreads, ...otherMemberThreads],
-    [sidebarThreads, otherMemberThreads],
-  );
   const sidebarThreadByKey = useMemo(
     () =>
       new Map(
-        allSidebarThreads.map(
+        projectThreads.map(
           (thread) =>
             [scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)), thread] as const,
         ),
       ),
-    [allSidebarThreads],
+    [projectThreads],
   );
   // Keep a ref so callbacks can read the latest map without appearing in
   // dependency arrays (avoids invalidating every thread-row memo on each
   // thread-list change).
   const sidebarThreadByKeyRef = useRef(sidebarThreadByKey);
   sidebarThreadByKeyRef.current = sidebarThreadByKey;
-  // All threads from the representative + other member environments are
-  // already fetched into allSidebarThreads, so we can use them directly.
-  const projectThreads = allSidebarThreads;
   const projectExpanded = useUiStateStore(
     (state) => state.projectExpandedById[project.projectKey] ?? true,
   );
@@ -2057,6 +2016,7 @@ interface SidebarProjectsContentProps {
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   sortedProjects: readonly SidebarProjectSnapshot[];
+  threadsByProjectKey: ReadonlyMap<string, readonly SidebarThreadSummary[]>;
   expandedThreadListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
   routeThreadKey: string | null;
@@ -2109,6 +2069,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     archiveThread,
     deleteThread,
     sortedProjects,
+    threadsByProjectKey,
     expandedThreadListsByProject,
     activeRouteProjectKey,
     routeThreadKey,
@@ -2305,6 +2266,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                     {(dragHandleProps) => (
                       <SidebarProjectItem
                         project={project}
+                        projectThreads={threadsByProjectKey.get(project.projectKey) ?? []}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
                           activeRouteProjectKey === project.projectKey ? routeThreadKey : null
@@ -2337,6 +2299,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               <SidebarProjectListRow
                 key={project.projectKey}
                 project={project}
+                projectThreads={threadsByProjectKey.get(project.projectKey) ?? []}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
                   activeRouteProjectKey === project.projectKey ? routeThreadKey : null
@@ -3236,6 +3199,7 @@ export default function Sidebar() {
             archiveThread={archiveThread}
             deleteThread={deleteThread}
             sortedProjects={sortedProjects}
+            threadsByProjectKey={threadsByProjectKey}
             expandedThreadListsByProject={expandedThreadListsByProject}
             activeRouteProjectKey={activeRouteProjectKey}
             routeThreadKey={routeThreadKey}
