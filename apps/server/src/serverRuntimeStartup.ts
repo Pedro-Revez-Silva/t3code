@@ -32,6 +32,7 @@ import { ServerSettingsService } from "./serverSettings";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService";
 import { ServerAuth } from "./auth/Services/ServerAuth";
+import { launchCodexDesktopSessionSync } from "./codexDesktopSessionSync";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -327,6 +328,9 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
       "reactors.start",
       orchestrationReactor.start().pipe(Scope.provide(reactorScope)),
     );
+
+    yield* Effect.logDebug("startup phase: importing desktop Codex sessions");
+    yield* runStartupPhase("codex.sync.start", launchCodexDesktopSessionSync);
 
     const welcomeBase = yield* resolveWelcomeBase;
     const environment = yield* serverEnvironment.getDescriptor;

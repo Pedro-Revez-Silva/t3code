@@ -24,6 +24,12 @@ import type {
 import { resolveModelSlugForProvider } from "@t3tools/shared/model";
 import { create } from "zustand";
 import {
+  derivePendingApprovals,
+  derivePendingUserInputs,
+  findLatestProposedPlan,
+  hasActionableProposedPlan,
+} from "./session-logic";
+import {
   type ChatMessage,
   type Project,
   type ProposedPlan,
@@ -203,6 +209,17 @@ function mapTurnDiffSummary(checkpoint: OrchestrationCheckpointSummary): TurnDif
   };
 }
 
+function deriveLatestUserMessageAt(messages: ReadonlyArray<ChatMessage>): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "user") {
+      return message.createdAt;
+    }
+  }
+
+  return null;
+}
+
 function mapProject(
   project:
     | OrchestrationReadModel["projects"][number]
@@ -247,6 +264,32 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     worktreePath: thread.worktreePath,
     turnDiffSummaries: thread.checkpoints.map(mapTurnDiffSummary),
     activities: thread.activities.map((activity) => ({ ...activity })),
+  };
+}
+
+function buildSidebarThreadSummaryFromThread(thread: Thread): SidebarThreadSummary {
+  const latestProposedPlan = findLatestProposedPlan(
+    thread.proposedPlans,
+    thread.latestTurn?.turnId ?? null,
+  );
+
+  return {
+    id: thread.id,
+    environmentId: thread.environmentId,
+    projectId: thread.projectId,
+    title: thread.title,
+    interactionMode: thread.interactionMode,
+    session: thread.session,
+    createdAt: thread.createdAt,
+    archivedAt: thread.archivedAt,
+    updatedAt: thread.updatedAt,
+    latestTurn: thread.latestTurn,
+    branch: thread.branch,
+    worktreePath: thread.worktreePath,
+    latestUserMessageAt: deriveLatestUserMessageAt(thread.messages),
+    hasPendingApprovals: derivePendingApprovals(thread.activities).length > 0,
+    hasPendingUserInput: derivePendingUserInputs(thread.activities).length > 0,
+    hasActionableProposedPlan: hasActionableProposedPlan(latestProposedPlan),
   };
 }
 
@@ -873,6 +916,58 @@ function buildLatestTurn(params: {
   };
 }
 
+function reconcileLatestTurnWithSession(input: {
+  latestTurn: Thread["latestTurn"];
+  session: ThreadSession | null;
+  pendingSourceProposedPlan?: Thread["pendingSourceProposedPlan"];
+}): Thread["latestTurn"] {
+  const { latestTurn, session, pendingSourceProposedPlan } = input;
+
+  if (session === null) {
+    return latestTurn;
+  }
+
+  if (session.status === "running" && session.activeTurnId != null) {
+    return buildLatestTurn({
+      previous: latestTurn,
+      turnId: session.activeTurnId,
+      state: "running",
+      requestedAt:
+        latestTurn?.turnId === session.activeTurnId ? latestTurn.requestedAt : session.updatedAt,
+      startedAt:
+        latestTurn?.turnId === session.activeTurnId
+          ? (latestTurn.startedAt ?? session.updatedAt)
+          : session.updatedAt,
+      completedAt: null,
+      assistantMessageId:
+        latestTurn?.turnId === session.activeTurnId ? latestTurn.assistantMessageId : null,
+      sourceProposedPlan: pendingSourceProposedPlan,
+    });
+  }
+
+  if (latestTurn === null || latestTurn.state !== "running" || latestTurn.completedAt !== null) {
+    return latestTurn;
+  }
+
+  const settledState =
+    session.orchestrationStatus === "error"
+      ? "error"
+      : session.orchestrationStatus === "interrupted" || session.orchestrationStatus === "stopped"
+        ? "interrupted"
+        : "completed";
+
+  return buildLatestTurn({
+    previous: latestTurn,
+    turnId: latestTurn.turnId,
+    state: settledState,
+    requestedAt: latestTurn.requestedAt,
+    startedAt: latestTurn.startedAt,
+    completedAt: session.updatedAt,
+    assistantMessageId: latestTurn.assistantMessageId,
+    sourceProposedPlan: latestTurn.sourceProposedPlan,
+  });
+}
+
 function rebindTurnDiffSummariesForAssistantMessage(
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>,
   turnId: TurnId,
@@ -1123,6 +1218,75 @@ export function syncServerShellSnapshot(
       environmentId,
     ),
   );
+}
+
+export function syncServerReadModel(
+  state: AppState,
+  snapshot: OrchestrationReadModel,
+  environmentId: EnvironmentId,
+): AppState {
+  const nextProjects = snapshot.projects.map((project) => mapProject(project, environmentId));
+  const nextThreadIds = new Set(snapshot.threads.map((thread) => thread.id));
+  let nextEnvironmentState: EnvironmentState = {
+    ...getStoredEnvironmentState(state, environmentId),
+    ...buildProjectState(nextProjects),
+    threadIds: [],
+    threadIdsByProjectId: {},
+    threadShellById: {},
+    threadSessionById: {},
+    threadTurnStateById: {},
+    sidebarThreadSummaryById: {},
+    messageIdsByThreadId: retainThreadScopedRecord(
+      getStoredEnvironmentState(state, environmentId).messageIdsByThreadId,
+      nextThreadIds,
+    ),
+    messageByThreadId: retainThreadScopedRecord(
+      getStoredEnvironmentState(state, environmentId).messageByThreadId,
+      nextThreadIds,
+    ),
+    activityIdsByThreadId: retainThreadScopedRecord(
+      getStoredEnvironmentState(state, environmentId).activityIdsByThreadId,
+      nextThreadIds,
+    ),
+    activityByThreadId: retainThreadScopedRecord(
+      getStoredEnvironmentState(state, environmentId).activityByThreadId,
+      nextThreadIds,
+    ),
+    proposedPlanIdsByThreadId: retainThreadScopedRecord(
+      getStoredEnvironmentState(state, environmentId).proposedPlanIdsByThreadId,
+      nextThreadIds,
+    ),
+    proposedPlanByThreadId: retainThreadScopedRecord(
+      getStoredEnvironmentState(state, environmentId).proposedPlanByThreadId,
+      nextThreadIds,
+    ),
+    turnDiffIdsByThreadId: retainThreadScopedRecord(
+      getStoredEnvironmentState(state, environmentId).turnDiffIdsByThreadId,
+      nextThreadIds,
+    ),
+    turnDiffSummaryByThreadId: retainThreadScopedRecord(
+      getStoredEnvironmentState(state, environmentId).turnDiffSummaryByThreadId,
+      nextThreadIds,
+    ),
+    bootstrapComplete: true,
+  };
+
+  for (const thread of snapshot.threads) {
+    const nextThread = mapThread(thread, environmentId);
+    const previousThread = getThreadFromEnvironmentState(
+      getStoredEnvironmentState(state, environmentId),
+      thread.id,
+    );
+    nextEnvironmentState = writeThreadState(nextEnvironmentState, nextThread, previousThread);
+    nextEnvironmentState = writeThreadShellState(nextEnvironmentState, {
+      shell: toThreadShell(nextThread),
+      session: nextThread.session,
+      turnState: toThreadTurnState(nextThread),
+      summary: buildSidebarThreadSummaryFromThread(nextThread),
+    });
+  }
+
+  return commitEnvironmentState(state, environmentId, nextEnvironmentState);
 }
 
 export function syncServerThreadDetail(
@@ -1446,28 +1610,11 @@ function applyEnvironmentOrchestrationEvent(
         ...thread,
         session: mapSession(event.payload.session),
         error: sanitizeThreadErrorMessage(event.payload.session.lastError),
-        latestTurn:
-          event.payload.session.status === "running" && event.payload.session.activeTurnId !== null
-            ? buildLatestTurn({
-                previous: thread.latestTurn,
-                turnId: event.payload.session.activeTurnId,
-                state: "running",
-                requestedAt:
-                  thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                    ? thread.latestTurn.requestedAt
-                    : event.payload.session.updatedAt,
-                startedAt:
-                  thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                    ? (thread.latestTurn.startedAt ?? event.payload.session.updatedAt)
-                    : event.payload.session.updatedAt,
-                completedAt: null,
-                assistantMessageId:
-                  thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                    ? thread.latestTurn.assistantMessageId
-                    : null,
-                sourceProposedPlan: thread.pendingSourceProposedPlan,
-              })
-            : thread.latestTurn,
+        latestTurn: reconcileLatestTurnWithSession({
+          latestTurn: thread.latestTurn,
+          session: mapSession(event.payload.session),
+          pendingSourceProposedPlan: thread.pendingSourceProposedPlan,
+        }),
         updatedAt: event.occurredAt,
       }));
 
@@ -1925,6 +2072,7 @@ export function setThreadBranch(
 
 interface AppStore extends AppState {
   setActiveEnvironmentId: (environmentId: EnvironmentId) => void;
+  syncServerReadModel: (snapshot: OrchestrationReadModel, environmentId: EnvironmentId) => void;
   syncServerShellSnapshot: (
     snapshot: OrchestrationShellSnapshot,
     environmentId: EnvironmentId,
@@ -1948,6 +2096,8 @@ export const useStore = create<AppStore>((set) => ({
   ...initialState,
   setActiveEnvironmentId: (environmentId) =>
     set((state) => setActiveEnvironmentId(state, environmentId)),
+  syncServerReadModel: (snapshot, environmentId) =>
+    set((state) => syncServerReadModel(state, snapshot, environmentId)),
   syncServerShellSnapshot: (snapshot, environmentId) =>
     set((state) => syncServerShellSnapshot(state, snapshot, environmentId)),
   syncServerThreadDetail: (thread, environmentId) =>

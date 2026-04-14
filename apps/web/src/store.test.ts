@@ -17,10 +17,12 @@ import {
   applyOrchestrationEvents,
   selectEnvironmentState,
   selectProjectsAcrossEnvironments,
+  selectSidebarThreadsAcrossEnvironments,
   selectThreadByRef,
   selectThreadExistsByRef,
   setThreadBranch,
   selectThreadsAcrossEnvironments,
+  syncServerReadModel,
   type AppState,
   type EnvironmentState,
 } from "./store";
@@ -216,6 +218,10 @@ function projectsOf(state: AppState) {
 
 function threadsOf(state: AppState) {
   return selectThreadsAcrossEnvironments(state);
+}
+
+function sidebarThreadsOf(state: AppState) {
+  return selectSidebarThreadsAcrossEnvironments(state);
 }
 
 function makeEvent<T extends OrchestrationEvent["type"]>(
@@ -744,6 +750,147 @@ describe("incremental orchestration updates", () => {
     expect(threadsOf(next)[0]?.session?.status).toBe("running");
     expect(threadsOf(next)[0]?.latestTurn?.state).toBe("completed");
     expect(threadsOf(next)[0]?.messages).toHaveLength(1);
+  });
+
+  it("settles a running latest turn when a session becomes idle", () => {
+    const thread = makeThread({
+      latestTurn: {
+        turnId: TurnId.make("turn-1"),
+        state: "running",
+        requestedAt: "2026-02-27T00:00:00.000Z",
+        startedAt: "2026-02-27T00:00:00.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      session: {
+        provider: "codex",
+        status: "running",
+        orchestrationStatus: "running",
+        activeTurnId: TurnId.make("turn-1"),
+        createdAt: "2026-02-27T00:00:00.000Z",
+        updatedAt: "2026-02-27T00:00:00.000Z",
+      },
+    });
+    const state = makeState(thread);
+
+    const next = applyOrchestrationEvent(
+      state,
+      makeEvent("thread.session-set", {
+        threadId: thread.id,
+        session: {
+          threadId: thread.id,
+          status: "idle",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-02-27T00:00:05.000Z",
+        },
+      }),
+      localEnvironmentId,
+    );
+
+    expect(threadsOf(next)[0]?.session?.status).toBe("closed");
+    expect(threadsOf(next)[0]?.latestTurn).toMatchObject({
+      turnId: TurnId.make("turn-1"),
+      state: "completed",
+      completedAt: "2026-02-27T00:00:05.000Z",
+    });
+  });
+
+  it("syncs a full read model snapshot into shell and thread detail state", () => {
+    const state = makeState(makeThread());
+
+    const next = syncServerReadModel(
+      state,
+      {
+        snapshotSequence: 2,
+        updatedAt: "2026-02-27T00:00:10.000Z",
+        projects: [
+          {
+            id: ProjectId.make("project-1"),
+            title: "Project",
+            workspaceRoot: "/tmp/project",
+            repositoryIdentity: null,
+            defaultModelSelection: {
+              provider: "codex",
+              model: DEFAULT_MODEL_BY_PROVIDER.codex,
+            },
+            scripts: [],
+            createdAt: "2026-02-13T00:00:00.000Z",
+            updatedAt: "2026-02-27T00:00:10.000Z",
+            deletedAt: null,
+          },
+        ],
+        threads: [
+          {
+            id: ThreadId.make("thread-1"),
+            projectId: ProjectId.make("project-1"),
+            title: "Thread",
+            modelSelection: {
+              provider: "codex",
+              model: DEFAULT_MODEL_BY_PROVIDER.codex,
+            },
+            runtimeMode: DEFAULT_RUNTIME_MODE,
+            interactionMode: DEFAULT_INTERACTION_MODE,
+            branch: null,
+            worktreePath: null,
+            latestTurn: {
+              turnId: TurnId.make("turn-1"),
+              state: "completed",
+              requestedAt: "2026-02-27T00:00:00.000Z",
+              startedAt: "2026-02-27T00:00:01.000Z",
+              completedAt: "2026-02-27T00:00:05.000Z",
+              assistantMessageId: MessageId.make("assistant-1"),
+            },
+            createdAt: "2026-02-13T00:00:00.000Z",
+            updatedAt: "2026-02-27T00:00:10.000Z",
+            archivedAt: null,
+            deletedAt: null,
+            messages: [
+              {
+                id: MessageId.make("user-1"),
+                role: "user",
+                text: "Hello",
+                turnId: null,
+                createdAt: "2026-02-27T00:00:00.000Z",
+                updatedAt: "2026-02-27T00:00:00.000Z",
+                streaming: false,
+                attachments: [],
+              },
+              {
+                id: MessageId.make("assistant-1"),
+                role: "assistant",
+                text: "Hi",
+                turnId: TurnId.make("turn-1"),
+                createdAt: "2026-02-27T00:00:05.000Z",
+                updatedAt: "2026-02-27T00:00:05.000Z",
+                streaming: false,
+                attachments: [],
+              },
+            ],
+            proposedPlans: [],
+            activities: [],
+            checkpoints: [],
+            session: {
+              threadId: ThreadId.make("thread-1"),
+              status: "idle",
+              providerName: "codex",
+              runtimeMode: DEFAULT_RUNTIME_MODE,
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: "2026-02-27T00:00:05.000Z",
+            },
+          },
+        ],
+      },
+      localEnvironmentId,
+    );
+
+    expect(threadsOf(next)[0]?.messages).toHaveLength(2);
+    expect(threadsOf(next)[0]?.latestTurn?.state).toBe("completed");
+    expect(sidebarThreadsOf(next)[0]?.latestTurn?.state).toBe("completed");
+    expect(sidebarThreadsOf(next)[0]?.latestUserMessageAt).toBe("2026-02-27T00:00:00.000Z");
   });
 
   it("does not regress latestTurn when an older turn diff completes late", () => {

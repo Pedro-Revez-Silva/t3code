@@ -1,10 +1,12 @@
 import { ProjectId, ThreadId } from "@t3tools/contracts";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   clearThreadUi,
+  hydratePersistedProjectStateForTests,
   markThreadUnread,
   reorderProjects,
+  resetPersistedProjectStateForTests,
   setProjectExpanded,
   setThreadChangedFilesExpanded,
   syncProjects,
@@ -23,6 +25,10 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
 }
 
 describe("uiStateStore pure functions", () => {
+  afterEach(() => {
+    resetPersistedProjectStateForTests();
+  });
+
   it("markThreadUnread moves lastVisitedAt before completion for a completed thread", () => {
     const threadId = ThreadId.make("thread-1");
     const latestTurnCompletedAt = "2026-02-25T12:30:00.000Z";
@@ -217,6 +223,42 @@ describe("uiStateStore pure functions", () => {
 
     expect(next.projectOrder).toEqual([recreatedProject2, oldProject1]);
     expect(next.projectExpandedById[recreatedProject2]).toBe(false);
+  });
+
+  it("syncProjects keeps unseen projects expanded when restoring persisted project state", () => {
+    const project1 = ProjectId.make("project-1");
+    const project2 = ProjectId.make("project-2");
+
+    hydratePersistedProjectStateForTests({
+      expandedProjectCwds: ["/tmp/project-1"],
+      projectOrderCwds: ["/tmp/project-1"],
+    });
+
+    const next = syncProjects(makeUiState(), [
+      { key: project1, cwd: "/tmp/project-1" },
+      { key: project2, cwd: "/tmp/project-2" },
+    ]);
+
+    expect(next.projectExpandedById[project1]).toBe(true);
+    expect(next.projectExpandedById[project2]).toBe(true);
+  });
+
+  it("syncProjects does not auto-collapse projects from persisted project state", () => {
+    const project1 = ProjectId.make("project-1");
+    const project2 = ProjectId.make("project-2");
+
+    hydratePersistedProjectStateForTests({
+      expandedProjectCwds: ["/tmp/project-1"],
+      projectOrderCwds: ["/tmp/project-1", "/tmp/project-2"],
+    });
+
+    const next = syncProjects(makeUiState(), [
+      { key: project1, cwd: "/tmp/project-1" },
+      { key: project2, cwd: "/tmp/project-2" },
+    ]);
+
+    expect(next.projectExpandedById[project1]).toBe(true);
+    expect(next.projectExpandedById[project2]).toBe(true);
   });
 
   it("syncProjects returns a new state when only project cwd changes", () => {

@@ -2,6 +2,7 @@ import {
   type AuthSessionRole,
   type EnvironmentId,
   type OrchestrationEvent,
+  type OrchestrationReadModel,
   type OrchestrationShellSnapshot,
   type OrchestrationShellStreamEvent,
   type ServerConfig,
@@ -30,6 +31,7 @@ import { deriveOrchestrationBatchEffects } from "~/orchestrationEventEffects";
 import { projectQueryKeys } from "~/lib/projectReactQuery";
 import { providerQueryKeys } from "~/lib/providerReactQuery";
 import { getPrimaryKnownEnvironment } from "../primary";
+import { resolvePrimaryEnvironmentHttpUrl } from "../primary/target";
 import {
   bootstrapRemoteBearerSession,
   fetchRemoteEnvironmentDescriptor,
@@ -96,6 +98,7 @@ let needsProviderInvalidation = false;
 // - Capacity eviction only targets idle cached subscriptions.
 const THREAD_DETAIL_SUBSCRIPTION_IDLE_EVICTION_MS = 15 * 60 * 1000;
 const MAX_CACHED_THREAD_DETAIL_SUBSCRIPTIONS = 32;
+const SNAPSHOT_SYNC_POLL_INTERVAL_MS = 3_000;
 const NOOP = () => undefined;
 
 function getThreadDetailSubscriptionKey(environmentId: EnvironmentId, threadId: ThreadId): string {
@@ -656,6 +659,21 @@ function createEnvironmentConnectionHandlers() {
   };
 }
 
+async function fetchPrimaryEnvironmentSnapshot(): Promise<OrchestrationReadModel> {
+  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/orchestration/snapshot"), {
+    credentials: "include",
+    headers: {
+      accept: "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to load orchestration snapshot (${response.status}).`);
+  }
+
+  return (await response.json()) as OrchestrationReadModel;
+}
+
 function createPrimaryEnvironmentClient(
   knownEnvironment: ReturnType<typeof getPrimaryKnownEnvironment>,
 ) {
@@ -1038,6 +1056,37 @@ export function startEnvironmentConnectionService(queryClient: QueryClient): () 
   );
 
   createPrimaryEnvironmentConnection();
+  const primaryKnownEnvironment = getPrimaryKnownEnvironment();
+  let lastSnapshotVersion: string | null = null;
+  const snapshotPollInterval = globalThis.setInterval(() => {
+    if (!primaryKnownEnvironment) {
+      return;
+    }
+    const primaryEnvironmentId = primaryKnownEnvironment.environmentId;
+    if (!primaryEnvironmentId) {
+      return;
+    }
+    if (typeof document !== "undefined" && document.hidden) {
+      return;
+    }
+
+    void fetchPrimaryEnvironmentSnapshot()
+      .then((snapshot) => {
+        const nextVersion = `${snapshot.snapshotSequence}:${snapshot.updatedAt}`;
+        if (nextVersion === lastSnapshotVersion) {
+          return;
+        }
+        lastSnapshotVersion = nextVersion;
+        useStore.getState().syncServerReadModel(snapshot, primaryEnvironmentId);
+        reconcileThreadDetailSubscriptionsForEnvironment(
+          primaryEnvironmentId,
+          snapshot.threads.map((thread) => thread.id),
+        );
+        reconcileThreadDetailSubscriptionEvictionForEnvironment(primaryEnvironmentId);
+        reconcileSnapshotDerivedState();
+      })
+      .catch(() => undefined);
+  }, SNAPSHOT_SYNC_POLL_INTERVAL_MS);
 
   const unsubscribeSavedEnvironments = useSavedEnvironmentRegistryStore.subscribe(() => {
     if (!hasSavedEnvironmentRegistryHydrated()) {
@@ -1055,6 +1104,7 @@ export function startEnvironmentConnectionService(queryClient: QueryClient): () 
     queryInvalidationThrottler,
     refCount: 1,
     stop: () => {
+      globalThis.clearInterval(snapshotPollInterval);
       unsubscribeSavedEnvironments();
       queryInvalidationThrottler.cancel();
     },
