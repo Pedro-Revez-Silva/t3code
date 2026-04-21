@@ -9,36 +9,36 @@ import { Effect, Layer, Option, Stream } from "effect";
 import {
   codexDesktopSessionSyncTestExports,
   launchCodexDesktopSessionSync,
-} from "./codexDesktopSessionSync";
+} from "./codexDesktopSessionSync.ts";
 import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
-} from "./orchestration/Services/OrchestrationEngine";
+} from "./orchestration/Services/OrchestrationEngine.ts";
 import {
   ProjectionProjectRepository,
   type ProjectionProjectRepositoryShape,
-} from "./persistence/Services/ProjectionProjects";
+} from "./persistence/Services/ProjectionProjects.ts";
 import {
   ProjectionThreadActivityRepository,
   type ProjectionThreadActivityRepositoryShape,
-} from "./persistence/Services/ProjectionThreadActivities";
+} from "./persistence/Services/ProjectionThreadActivities.ts";
 import {
   ProjectionThreadMessageRepository,
   type ProjectionThreadMessageRepositoryShape,
-} from "./persistence/Services/ProjectionThreadMessages";
+} from "./persistence/Services/ProjectionThreadMessages.ts";
 import {
   ProjectionThreadSessionRepository,
   type ProjectionThreadSessionRepositoryShape,
-} from "./persistence/Services/ProjectionThreadSessions";
+} from "./persistence/Services/ProjectionThreadSessions.ts";
 import {
   ProjectionThreadRepository,
   type ProjectionThreadRepositoryShape,
-} from "./persistence/Services/ProjectionThreads";
+} from "./persistence/Services/ProjectionThreads.ts";
 import {
   ProviderSessionDirectory,
   type ProviderSessionDirectoryShape,
-} from "./provider/Services/ProviderSessionDirectory";
-import { ServerSettingsService, type ServerSettingsShape } from "./serverSettings";
+} from "./provider/Services/ProviderSessionDirectory.ts";
+import { ServerSettingsService, type ServerSettingsShape } from "./serverSettings.ts";
 
 describe("codexDesktopSessionSync", () => {
   it("parses the latest session index entry per thread and ignores invalid lines", () => {
@@ -264,18 +264,22 @@ describe("codexDesktopSessionSync", () => {
     );
 
     const sessionIndex = codexDesktopSessionSyncTestExports.parseSessionIndex(filePath);
-    const changed = codexDesktopSessionSyncTestExports.appendSessionIndexUpdates(filePath, sessionIndex, [
-      {
-        threadId: "thread-1",
-        title: "Current title",
-        updatedAt: "2026-04-07T18:00:00.000Z",
-      },
-      {
-        threadId: "thread-2",
-        title: "New thread",
-        updatedAt: "2026-04-07T18:01:00.000Z",
-      },
-    ] as never);
+    const changed = codexDesktopSessionSyncTestExports.appendSessionIndexUpdates(
+      filePath,
+      sessionIndex,
+      [
+        {
+          threadId: "thread-1",
+          title: "Current title",
+          updatedAt: "2026-04-07T18:00:00.000Z",
+        },
+        {
+          threadId: "thread-2",
+          title: "New thread",
+          updatedAt: "2026-04-07T18:01:00.000Z",
+        },
+      ] as never,
+    );
 
     expect(changed).toBe(true);
     expect(sessionIndex.get("thread-2")).toEqual({
@@ -364,48 +368,54 @@ describe("codexDesktopSessionSync", () => {
       "utf8",
     );
 
-    const projects: Array<unknown> = [];
-    const threads: Array<unknown> = [];
-    const messages: Array<unknown> = [];
-    const activities: Array<unknown> = [];
-    const sessions: Array<unknown> = [];
-    const providerBindings: Array<unknown> = [];
+    const projects: Array<Parameters<ProjectionProjectRepositoryShape["upsert"]>[0]> = [];
+    const threads: Array<Parameters<ProjectionThreadRepositoryShape["upsert"]>[0]> = [];
+    const messages: Array<Parameters<ProjectionThreadMessageRepositoryShape["upsert"]>[0]> = [];
+    const activities: Array<Parameters<ProjectionThreadActivityRepositoryShape["upsert"]>[0]> = [];
+    const sessions: Array<Parameters<ProjectionThreadSessionRepositoryShape["upsert"]>[0]> = [];
+    const providerBindings: Array<Parameters<ProviderSessionDirectoryShape["upsert"]>[0]> = [];
     let refreshCount = 0;
 
     const projectRepo: ProjectionProjectRepositoryShape = {
-      upsert: (row) => Effect.sync(() => void projects.push(row)),
+      upsert: (row: Parameters<ProjectionProjectRepositoryShape["upsert"]>[0]) =>
+        Effect.sync(() => void projects.push(row)),
       getById: () => Effect.succeed(Option.none()),
       listAll: () => Effect.succeed([]),
       deleteById: () => Effect.void,
     };
     const threadRepo: ProjectionThreadRepositoryShape = {
-      upsert: (row) => Effect.sync(() => void threads.push(row)),
+      upsert: (row: Parameters<ProjectionThreadRepositoryShape["upsert"]>[0]) =>
+        Effect.sync(() => void threads.push(row)),
       getById: () => Effect.succeed(Option.none()),
       listByProjectId: () => Effect.succeed([]),
       deleteById: () => Effect.void,
     };
     const messageRepo: ProjectionThreadMessageRepositoryShape = {
-      upsert: (row) => Effect.sync(() => void messages.push(row)),
+      upsert: (row: Parameters<ProjectionThreadMessageRepositoryShape["upsert"]>[0]) =>
+        Effect.sync(() => void messages.push(row)),
       getByMessageId: () => Effect.succeed(Option.none()),
       listByThreadId: () => Effect.succeed([]),
       deleteByThreadId: () => Effect.void,
     };
     const activityRepo: ProjectionThreadActivityRepositoryShape = {
-      upsert: (row) => Effect.sync(() => void activities.push(row)),
+      upsert: (row: Parameters<ProjectionThreadActivityRepositoryShape["upsert"]>[0]) =>
+        Effect.sync(() => void activities.push(row)),
       listByThreadId: () => Effect.succeed([]),
       deleteByThreadId: () => Effect.void,
     };
     const sessionRepo: ProjectionThreadSessionRepositoryShape = {
-      upsert: (row) => Effect.sync(() => void sessions.push(row)),
+      upsert: (row: Parameters<ProjectionThreadSessionRepositoryShape["upsert"]>[0]) =>
+        Effect.sync(() => void sessions.push(row)),
       getByThreadId: () => Effect.succeed(Option.none()),
       deleteByThreadId: () => Effect.void,
     };
     const providerSessionDirectory: ProviderSessionDirectoryShape = {
-      upsert: (binding) => Effect.sync(() => void providerBindings.push(binding)),
+      upsert: (binding: Parameters<ProviderSessionDirectoryShape["upsert"]>[0]) =>
+        Effect.sync(() => void providerBindings.push(binding)),
       getProvider: () => Effect.die("not implemented"),
       getBinding: () => Effect.succeed(Option.none()),
-      remove: () => Effect.void,
       listThreadIds: () => Effect.succeed([]),
+      listBindings: () => Effect.succeed([]),
     };
     const orchestrationEngine: OrchestrationEngineShape = {
       getReadModel: () => Effect.die("not implemented"),
