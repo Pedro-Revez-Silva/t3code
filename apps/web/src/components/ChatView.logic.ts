@@ -231,10 +231,8 @@ export function deriveLockedProvider(input: {
   selectedProvider: ProviderKind | null;
   threadProvider: ProviderKind | null;
 }): ProviderKind | null {
-  if (!threadHasStarted(input.thread)) {
-    return null;
-  }
-  return input.thread?.session?.provider ?? input.threadProvider ?? input.selectedProvider ?? null;
+  void input;
+  return null;
 }
 
 export async function waitForStartedServerThread(

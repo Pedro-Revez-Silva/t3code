@@ -8,6 +8,7 @@ import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   buildExpiredTerminalContextToastCopy,
   createLocalDispatchSnapshot,
+  deriveLockedProvider,
   deriveComposerSendState,
   hasServerAcknowledgedLocalDispatch,
   reconcileMountedTerminalThreadIds,
@@ -80,6 +81,36 @@ describe("buildExpiredTerminalContextToastCopy", () => {
       title: "Expired terminal contexts omitted from message",
       description: "Re-add it if you want that terminal output included.",
     });
+  });
+});
+
+describe("deriveLockedProvider", () => {
+  it("does not lock the provider for started threads", () => {
+    expect(
+      deriveLockedProvider({
+        thread: makeThread({
+          latestTurn: {
+            turnId: TurnId.make("turn-1"),
+            state: "completed",
+            requestedAt: "2026-03-29T00:00:00.000Z",
+            startedAt: "2026-03-29T00:00:01.000Z",
+            completedAt: "2026-03-29T00:00:02.000Z",
+          },
+        }),
+        selectedProvider: "claudeAgent",
+        threadProvider: "codex",
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps draft threads unlocked as well", () => {
+    expect(
+      deriveLockedProvider({
+        thread: makeThread(),
+        selectedProvider: "opencode",
+        threadProvider: "codex",
+      }),
+    ).toBeNull();
   });
 });
 

@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import os from "node:os";
 
 import {
@@ -14,18 +13,28 @@ import {
   type RuntimeMode,
 } from "@t3tools/contracts";
 import { Effect, Ref, Scope } from "effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
 } from "./orchestration/Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProjectionProjectRepository } from "./persistence/Services/ProjectionProjects.ts";
 import { ProjectionThreadActivityRepository } from "./persistence/Services/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessageRepository } from "./persistence/Services/ProjectionThreadMessages.ts";
 import { ProjectionThreadSessionRepository } from "./persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
+import { ProviderThreadMirrorRepository } from "./persistence/Services/ProviderThreadMirrors.ts";
 import { ProviderSessionDirectory } from "./provider/Services/ProviderSessionDirectory.ts";
 import { ServerSettingsService } from "./serverSettings.ts";
+import {
+  ensureCanonicalWorkspaceProject,
+  makeHashedProjectId,
+  makeProjectTitleFromRoot,
+  reconcileWorkspaceProjectDuplicates,
+  truncateSessionSummary,
+} from "./sessionSyncShared.ts";
 
 const SESSION_SYNC_INTERVAL = "3 seconds";
 const DESKTOP_RUNNING_SESSION_FRESHNESS_MS = 2 * 60 * 1000;
@@ -92,15 +101,6 @@ function trimToUndefined(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function makeProjectId(workspaceRoot: string): ProjectId {
-  const digest = createHash("sha1").update(workspaceRoot).digest("hex");
-  return ProjectId.make(`codex-project-${digest.slice(0, 16)}`);
-}
-
-function makeProjectTitle(workspaceRoot: string): string {
-  return basename(workspaceRoot) || "project";
 }
 
 function makeMessageId(threadId: ThreadId, ordinal: number): MessageId {
@@ -199,14 +199,6 @@ function resolveInteractionMode(
   return undefined;
 }
 
-function truncateSummary(value: string): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= 120) {
-    return normalized;
-  }
-  return `${normalized.slice(0, 117)}...`;
-}
-
 function maxIsoTimestamp(...values: Array<string | null | undefined>): string | undefined {
   let latest: string | undefined;
   for (const value of values) {
@@ -291,8 +283,8 @@ function parseSessionFile(
 
       threadId = ThreadId.make(rawThreadId);
       workspaceRoot = rawWorkspaceRoot;
-      projectId = makeProjectId(rawWorkspaceRoot);
-      projectTitle = makeProjectTitle(rawWorkspaceRoot);
+      projectId = makeHashedProjectId("codex-project", rawWorkspaceRoot);
+      projectTitle = makeProjectTitleFromRoot(rawWorkspaceRoot);
       registerTimestamp(normalizeIsoTimestamp(payload.timestamp));
       continue;
     }
@@ -364,7 +356,7 @@ function parseSessionFile(
         activities.push({
           tone: "info",
           kind: `codex.${phase ?? "commentary"}`,
-          summary: truncateSummary(text),
+          summary: truncateSessionSummary(text),
           payload: {
             phase: phase ?? "commentary",
             message: text,
@@ -400,7 +392,7 @@ function parseSessionFile(
     projectId,
     projectTitle,
     workspaceRoot,
-    title: truncateSummary(title),
+    title: truncateSessionSummary(title),
     createdAt: normalizedCreatedAt,
     updatedAt: normalizedUpdatedAt,
     model,
@@ -471,18 +463,23 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
   | ProjectionThreadMessageRepository
   | ProjectionThreadActivityRepository
   | ProjectionThreadSessionRepository
+  | ProviderThreadMirrorRepository
   | ProviderSessionDirectory
   | OrchestrationEngineService
+  | ProjectionSnapshotQuery
+  | SqlClient.SqlClient
   | ServerSettingsService
   | Scope.Scope
 > = Effect.gen(function* () {
-  const projectionProjects = yield* ProjectionProjectRepository;
   const projectionThreads = yield* ProjectionThreadRepository;
   const projectionThreadMessages = yield* ProjectionThreadMessageRepository;
   const projectionThreadActivities = yield* ProjectionThreadActivityRepository;
   const projectionThreadSessions = yield* ProjectionThreadSessionRepository;
   const providerSessionDirectory = yield* ProviderSessionDirectory;
+  const providerThreadMirrorRepository = yield* ProviderThreadMirrorRepository;
   const orchestrationEngine = yield* OrchestrationEngineService;
+  yield* ProjectionSnapshotQuery;
+  const sql = yield* SqlClient.SqlClient;
   const serverSettings = yield* ServerSettingsService;
 
   const syncState = yield* Ref.make<SyncState>({
@@ -492,23 +489,20 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
 
   const importSession = (session: ImportedSession) =>
     Effect.gen(function* () {
-      yield* projectionProjects.upsert({
-        projectId: session.projectId,
-        title: session.projectTitle,
+      const canonicalProjectId = yield* ensureCanonicalWorkspaceProject({
         workspaceRoot: session.workspaceRoot,
+        projectTitle: session.projectTitle,
         defaultModelSelection: {
           provider: "codex",
           model: session.model,
         },
-        scripts: [],
         createdAt: session.createdAt,
         updatedAt: session.updatedAt,
-        deletedAt: null,
       });
 
       yield* projectionThreads.upsert({
         threadId: session.threadId,
-        projectId: session.projectId,
+        projectId: canonicalProjectId,
         title: session.title,
         modelSelection: {
           provider: "codex",
@@ -587,6 +581,32 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
           importedFromDesktopCodex: true,
         },
       });
+
+      yield* providerThreadMirrorRepository.upsert({
+        threadId: session.threadId,
+        providerName: "codex",
+        externalThreadId: session.threadId,
+        lastSeenAt: session.updatedAt,
+        lastImportedAt: new Date().toISOString(),
+        lastExportedAt: null,
+        resumeCursor: {
+          threadId: session.threadId,
+        },
+        runtimePayload: {
+          cwd: session.workspaceRoot,
+          model: session.model,
+          modelSelection: {
+            provider: "codex",
+            model: session.model,
+          },
+          importedFromDesktopCodex: true,
+        },
+        metadata: {
+          source: "desktop-codex",
+          title: session.title,
+          status: session.status,
+        },
+      });
     });
 
   const syncOnce = Effect.gen(function* () {
@@ -634,20 +654,29 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
       importedSessions,
     );
 
-    yield* Effect.forEach(importedSessions, (session) => importSession(session));
-    yield* Ref.set(syncState, {
-      sessionIndexMtimeMs: sessionIndexUpdated
-        ? statSync(sessionIndexPath).mtimeMs
-        : nextSessionIndexMtimeMs,
-      sessionFileMtimes: fileStats,
-    });
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* Effect.forEach(importedSessions, (session) => importSession(session));
+        yield* reconcileWorkspaceProjectDuplicates();
+        yield* Ref.set(syncState, {
+          sessionIndexMtimeMs: sessionIndexUpdated
+            ? statSync(sessionIndexPath).mtimeMs
+            : nextSessionIndexMtimeMs,
+          sessionFileMtimes: fileStats,
+        });
+      }),
+    );
 
     return importedSessions.length > 0;
   });
 
   const refreshImportedReadModel = (engine: OrchestrationEngineShape) =>
-    syncOnce.pipe(
-      Effect.flatMap((changed) => (changed ? engine.refreshReadModel() : Effect.void)),
+    Effect.gen(function* () {
+      const importedChanged = yield* syncOnce;
+      if (importedChanged) {
+        yield* engine.refreshReadModel();
+      }
+    }).pipe(
       Effect.catch((cause) =>
         Effect.logWarning("failed to import desktop Codex sessions during startup", { cause }),
       ),
@@ -657,10 +686,12 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
 
   yield* Effect.forkScoped(
     Effect.forever(
-      syncOnce.pipe(
-        Effect.flatMap((changed) =>
-          changed ? orchestrationEngine.refreshReadModel().pipe(Effect.asVoid) : Effect.void,
-        ),
+      Effect.gen(function* () {
+        const importedChanged = yield* syncOnce;
+        if (importedChanged) {
+          yield* orchestrationEngine.refreshReadModel().pipe(Effect.asVoid);
+        }
+      }).pipe(
         Effect.catch((cause) =>
           Effect.logWarning("failed to sync desktop Codex sessions", { cause }),
         ),

@@ -33,6 +33,7 @@ import { OrchestrationEventStoreLive } from "../src/persistence/Layers/Orchestra
 import { ProjectionCheckpointRepositoryLive } from "../src/persistence/Layers/ProjectionCheckpoints.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../src/persistence/Layers/ProjectionPendingApprovals.ts";
 import { ProviderSessionRuntimeRepositoryLive } from "../src/persistence/Layers/ProviderSessionRuntime.ts";
+import { ProviderThreadMirrorRepositoryLive } from "../src/persistence/Layers/ProviderThreadMirrors.ts";
 import { makeSqlitePersistenceLive } from "../src/persistence/Layers/Sqlite.ts";
 import { ProjectionCheckpointRepository } from "../src/persistence/Services/ProjectionCheckpoints.ts";
 import { ProjectionPendingApprovalRepository } from "../src/persistence/Services/ProjectionPendingApprovals.ts";
@@ -261,6 +262,9 @@ export const makeOrchestrationIntegrationHarness = (
     const providerSessionDirectoryLayer = ProviderSessionDirectoryLive.pipe(
       Layer.provide(ProviderSessionRuntimeRepositoryLive),
     );
+    const providerThreadMirrorLayer = ProviderThreadMirrorRepositoryLive.pipe(
+      Layer.provide(persistenceLayer),
+    );
     const realCodexRegistry = Layer.effect(
       ProviderAdapterRegistry,
       Effect.gen(function* () {
@@ -282,11 +286,13 @@ export const makeOrchestrationIntegrationHarness = (
     const providerLayer = useRealCodex
       ? makeProviderServiceLive().pipe(
           Layer.provide(providerSessionDirectoryLayer),
+          Layer.provide(providerThreadMirrorLayer),
           Layer.provide(realCodexRegistry),
           Layer.provide(AnalyticsService.layerTest),
         )
       : makeProviderServiceLive().pipe(
           Layer.provide(providerSessionDirectoryLayer),
+          Layer.provide(providerThreadMirrorLayer),
           Layer.provide(fakeRegistry!),
           Layer.provide(AnalyticsService.layerTest),
         );

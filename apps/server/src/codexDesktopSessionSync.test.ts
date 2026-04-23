@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 import { Effect, Layer, Option, Stream } from "effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
   codexDesktopSessionSyncTestExports,
@@ -14,6 +15,7 @@ import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
 } from "./orchestration/Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   ProjectionProjectRepository,
   type ProjectionProjectRepositoryShape,
@@ -34,6 +36,10 @@ import {
   ProjectionThreadRepository,
   type ProjectionThreadRepositoryShape,
 } from "./persistence/Services/ProjectionThreads.ts";
+import {
+  ProviderThreadMirrorRepository,
+  type ProviderThreadMirrorRepositoryShape,
+} from "./persistence/Services/ProviderThreadMirrors.ts";
 import {
   ProviderSessionDirectory,
   type ProviderSessionDirectoryShape,
@@ -374,6 +380,7 @@ describe("codexDesktopSessionSync", () => {
     const activities: Array<Parameters<ProjectionThreadActivityRepositoryShape["upsert"]>[0]> = [];
     const sessions: Array<Parameters<ProjectionThreadSessionRepositoryShape["upsert"]>[0]> = [];
     const providerBindings: Array<Parameters<ProviderSessionDirectoryShape["upsert"]>[0]> = [];
+    const providerMirrors: Array<Parameters<ProviderThreadMirrorRepositoryShape["upsert"]>[0]> = [];
     let refreshCount = 0;
 
     const projectRepo: ProjectionProjectRepositoryShape = {
@@ -417,6 +424,15 @@ describe("codexDesktopSessionSync", () => {
       listThreadIds: () => Effect.succeed([]),
       listBindings: () => Effect.succeed([]),
     };
+    const providerThreadMirrorRepository: ProviderThreadMirrorRepositoryShape = {
+      upsert: (mirror: Parameters<ProviderThreadMirrorRepositoryShape["upsert"]>[0]) =>
+        Effect.sync(() => void providerMirrors.push(mirror)),
+      getByThreadAndProvider: () => Effect.succeed(Option.none()),
+      listByThreadId: () => Effect.succeed([]),
+      list: () => Effect.succeed([]),
+      deleteByThreadId: () => Effect.void,
+      deleteByThreadAndProvider: () => Effect.void,
+    };
     const orchestrationEngine: OrchestrationEngineShape = {
       getReadModel: () => Effect.die("not implemented"),
       refreshReadModel: () =>
@@ -444,6 +460,26 @@ describe("codexDesktopSessionSync", () => {
       updateSettings: () => Effect.die("not implemented"),
       streamChanges: Stream.empty,
     };
+    const projectionSnapshotQuery = {
+      getSnapshot: () =>
+        Effect.succeed({
+          snapshotSequence: 0,
+          projects: [],
+          threads: [],
+          updatedAt: "2026-04-07T18:00:16.000Z",
+        }),
+      getShellSnapshot: () => Effect.die("not implemented"),
+      getCounts: () => Effect.die("not implemented"),
+      getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+      getProjectShellById: () => Effect.succeed(Option.none()),
+      getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+      getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+      getThreadShellById: () => Effect.succeed(Option.none()),
+      getThreadDetailById: () => Effect.succeed(Option.none()),
+    } as const;
+    const sqlClient = {
+      withTransaction: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+    } as const;
 
     await Effect.runPromise(
       Effect.scoped(
@@ -456,7 +492,10 @@ describe("codexDesktopSessionSync", () => {
               Layer.succeed(ProjectionThreadActivityRepository, activityRepo),
               Layer.succeed(ProjectionThreadSessionRepository, sessionRepo),
               Layer.succeed(ProviderSessionDirectory, providerSessionDirectory),
+              Layer.succeed(ProviderThreadMirrorRepository, providerThreadMirrorRepository),
               Layer.succeed(OrchestrationEngineService, orchestrationEngine),
+              Layer.succeed(ProjectionSnapshotQuery, projectionSnapshotQuery),
+              Layer.succeed(SqlClient.SqlClient, sqlClient as SqlClient.SqlClient),
               Layer.succeed(ServerSettingsService, serverSettings),
             ),
           ),
@@ -470,10 +509,20 @@ describe("codexDesktopSessionSync", () => {
     expect(activities).toHaveLength(0);
     expect(sessions).toHaveLength(1);
     expect(providerBindings).toHaveLength(1);
+    expect(providerMirrors).toHaveLength(1);
     expect(refreshCount).toBe(1);
     expect(messages).toEqual([
       expect.objectContaining({ role: "user", text: "hello" }),
       expect.objectContaining({ role: "assistant", text: "world" }),
     ]);
+    expect(providerMirrors[0]).toMatchObject({
+      threadId: "thread-1",
+      providerName: "codex",
+      externalThreadId: "thread-1",
+      metadata: expect.objectContaining({
+        source: "desktop-codex",
+        title: "Imported thread",
+      }),
+    });
   });
 });

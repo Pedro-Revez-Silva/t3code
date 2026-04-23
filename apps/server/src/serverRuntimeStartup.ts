@@ -34,6 +34,8 @@ import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { ProviderSessionReaper } from "./provider/Services/ProviderSessionReaper.ts";
 import { launchCodexDesktopSessionSync } from "./codexDesktopSessionSync.ts";
+import { launchClaudeSessionSync } from "./claudeSessionSync.ts";
+import { launchOpenCodeSessionSync } from "./opencodeSessionSync.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -336,6 +338,10 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
 
     yield* Effect.logDebug("startup phase: importing desktop Codex sessions");
     yield* runStartupPhase("codex.sync.start", launchCodexDesktopSessionSync);
+    yield* Effect.logDebug("startup phase: importing Claude sessions");
+    yield* runStartupPhase("claude.sync.start", launchClaudeSessionSync);
+    yield* Effect.logDebug("startup phase: importing OpenCode sessions");
+    yield* runStartupPhase("opencode.sync.start", launchOpenCodeSessionSync);
 
     const welcomeBase = yield* resolveWelcomeBase;
     const environment = yield* serverEnvironment.getDescriptor;

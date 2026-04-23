@@ -277,18 +277,8 @@ const make = Effect.gen(function* () {
       ? thread.session.providerName
       : undefined;
     const requestedModelSelection = options?.modelSelection;
-    const threadProvider: ProviderKind = currentProvider ?? thread.modelSelection.provider;
-    if (
-      requestedModelSelection !== undefined &&
-      requestedModelSelection.provider !== threadProvider
-    ) {
-      return yield* new ProviderAdapterRequestError({
-        provider: threadProvider,
-        method: "thread.turn.start",
-        detail: `Thread '${threadId}' is bound to provider '${threadProvider}' and cannot switch to '${requestedModelSelection.provider}'.`,
-      });
-    }
-    const preferredProvider: ProviderKind = threadProvider;
+    const preferredProvider: ProviderKind =
+      requestedModelSelection?.provider ?? currentProvider ?? thread.modelSelection.provider;
     const desiredModelSelection = requestedModelSelection ?? thread.modelSelection;
     const effectiveCwd = resolveThreadWorkspaceCwd({
       thread,
@@ -332,33 +322,38 @@ const make = Effect.gen(function* () {
     const activeSession = yield* resolveActiveSession(threadId);
     const existingSessionThreadId =
       thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
-    if (existingSessionThreadId) {
+    if (existingSessionThreadId && activeSession) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
+      const providerChanged = activeSession.provider !== preferredProvider;
       const sessionModelSwitch =
-        currentProvider === undefined
+        providerChanged || currentProvider === undefined
           ? "in-session"
           : (yield* providerService.getCapabilities(currentProvider)).sessionModelSwitch;
       const modelChanged =
         requestedModelSelection !== undefined &&
-        requestedModelSelection.model !== activeSession?.model;
-      const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "unsupported";
+        requestedModelSelection.model !== activeSession.model;
+      const shouldRestartForModelChange =
+        !providerChanged && modelChanged && sessionModelSwitch === "unsupported";
       const previousModelSelection = threadModelSelections.get(threadId);
       const shouldRestartForModelSelectionChange =
+        !providerChanged &&
         currentProvider === "claudeAgent" &&
         requestedModelSelection !== undefined &&
         !Equal.equals(previousModelSelection, requestedModelSelection);
 
       if (
         !runtimeModeChanged &&
+        !providerChanged &&
         !shouldRestartForModelChange &&
         !shouldRestartForModelSelectionChange
       ) {
         return existingSessionThreadId;
       }
 
-      const resumeCursor = shouldRestartForModelChange
-        ? undefined
-        : (activeSession?.resumeCursor ?? undefined);
+      const resumeCursor =
+        providerChanged || shouldRestartForModelChange
+          ? undefined
+          : (activeSession.resumeCursor ?? undefined);
       yield* Effect.logInfo("provider command reactor restarting provider session", {
         threadId,
         existingSessionThreadId,
@@ -367,6 +362,7 @@ const make = Effect.gen(function* () {
         currentRuntimeMode: thread.session?.runtimeMode,
         desiredRuntimeMode: thread.runtimeMode,
         runtimeModeChanged,
+        providerChanged,
         modelChanged,
         shouldRestartForModelChange,
         shouldRestartForModelSelectionChange,

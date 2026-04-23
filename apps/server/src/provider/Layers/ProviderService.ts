@@ -34,6 +34,7 @@ import {
   providerTurnMetricAttributes,
   withMetrics,
 } from "../../observability/Metrics.ts";
+import { ProviderThreadMirrorRepository } from "../../persistence/Services/ProviderThreadMirrors.ts";
 import { ProviderValidationError } from "../Errors.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
 import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
@@ -141,6 +142,23 @@ function readPersistedCwd(
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergeRuntimePayload(
+  existing: unknown | null,
+  next: unknown | null | undefined,
+): unknown | null {
+  if (next === undefined) {
+    return existing ?? null;
+  }
+  if (isRecord(existing) && isRecord(next)) {
+    return { ...existing, ...next };
+  }
+  return next;
+}
+
 const makeProviderService = Effect.fn("makeProviderService")(function* (
   options?: ProviderServiceLiveOptions,
 ) {
@@ -156,6 +174,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const registry = yield* ProviderAdapterRegistry;
   const directory = yield* ProviderSessionDirectory;
+  const providerThreadMirrorRepository = yield* ProviderThreadMirrorRepository;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
@@ -178,14 +197,50 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       readonly lastRuntimeEventAt?: string;
     },
   ) =>
-    directory.upsert({
-      threadId,
-      provider: session.provider,
-      runtimeMode: session.runtimeMode,
-      status: toRuntimeStatus(session),
-      ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
-      runtimePayload: toRuntimePayloadFromSession(session, extra),
+    Effect.gen(function* () {
+      const runtimePayload = toRuntimePayloadFromSession(session, extra);
+      yield* directory.upsert({
+        threadId,
+        provider: session.provider,
+        runtimeMode: session.runtimeMode,
+        status: toRuntimeStatus(session),
+        ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
+        runtimePayload,
+      });
+
+      const existingMirror = Option.getOrUndefined(
+        yield* providerThreadMirrorRepository.getByThreadAndProvider({
+          threadId,
+          providerName: session.provider,
+        }),
+      );
+      if (!existingMirror) {
+        return;
+      }
+
+      yield* providerThreadMirrorRepository.upsert({
+        ...existingMirror,
+        lastSeenAt: session.updatedAt,
+        resumeCursor:
+          session.resumeCursor !== undefined ? session.resumeCursor : existingMirror.resumeCursor,
+        runtimePayload: mergeRuntimePayload(existingMirror.runtimePayload, runtimePayload),
+      });
     });
+
+  const resolvePersistedProviderState = Effect.fn("resolvePersistedProviderState")(function* (
+    threadId: ThreadId,
+    provider: ProviderRuntimeBinding["provider"],
+  ) {
+    const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+    const matchingBinding = binding?.provider === provider ? binding : undefined;
+    const mirror = Option.getOrUndefined(
+      yield* providerThreadMirrorRepository.getByThreadAndProvider({
+        threadId,
+        providerName: provider,
+      }),
+    );
+    return { binding: matchingBinding, mirror } as const;
+  });
 
   const providers = yield* registry.listProviders();
   const adapters = yield* Effect.forEach(providers, (provider) => registry.getByProvider(provider));
@@ -368,15 +423,27 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             `Provider '${input.provider}' is disabled in T3 Code settings.`,
           );
         }
-        const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+        const persisted = yield* resolvePersistedProviderState(threadId, input.provider);
         const effectiveResumeCursor =
           input.resumeCursor ??
-          (persistedBinding?.provider === input.provider
-            ? persistedBinding.resumeCursor
-            : undefined);
+          persisted.binding?.resumeCursor ??
+          persisted.mirror?.resumeCursor ??
+          undefined;
+        const effectiveCwd =
+          input.cwd ??
+          readPersistedCwd(persisted.binding?.runtimePayload) ??
+          readPersistedCwd(persisted.mirror?.runtimePayload);
+        const effectiveModelSelection =
+          input.modelSelection ??
+          readPersistedModelSelection(persisted.binding?.runtimePayload) ??
+          readPersistedModelSelection(persisted.mirror?.runtimePayload);
         const adapter = yield* registry.getByProvider(input.provider);
         const session = yield* adapter.startSession({
           ...input,
+          ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
+          ...(effectiveModelSelection !== undefined
+            ? { modelSelection: effectiveModelSelection }
+            : {}),
           ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
         });
 
@@ -392,16 +459,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           currentProvider: adapter.provider,
         });
         yield* upsertSessionBinding(session, threadId, {
-          modelSelection: input.modelSelection,
+          modelSelection: effectiveModelSelection,
         });
         yield* analytics.record("provider.session.started", {
           provider: session.provider,
           runtimeMode: input.runtimeMode,
           hasResumeCursor: session.resumeCursor !== undefined,
-          hasCwd: typeof input.cwd === "string" && input.cwd.trim().length > 0,
+          hasCwd: typeof effectiveCwd === "string" && effectiveCwd.trim().length > 0,
           hasModel:
-            typeof input.modelSelection?.model === "string" &&
-            input.modelSelection.model.trim().length > 0,
+            typeof effectiveModelSelection?.model === "string" &&
+            effectiveModelSelection.model.trim().length > 0,
         });
 
         return session;

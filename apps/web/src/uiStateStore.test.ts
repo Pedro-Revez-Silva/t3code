@@ -232,11 +232,12 @@ describe("uiStateStore pure functions", () => {
     expect(next.projectExpandedById[keyProject2]).toBe(false);
   });
 
-  it("syncProjects keeps unseen projects expanded when restoring persisted project state", () => {
+  it("syncProjects keeps unseen projects expanded when restoring new-shape persisted project state", () => {
     const project1 = ProjectId.make("project-1");
     const project2 = ProjectId.make("project-2");
 
     hydratePersistedProjectStateForTests({
+      collapsedProjectCwds: [],
       expandedProjectCwds: ["/tmp/project-1"],
       projectOrderCwds: ["/tmp/project-1"],
     });
@@ -250,11 +251,12 @@ describe("uiStateStore pure functions", () => {
     expect(next.projectExpandedById[project2]).toBe(true);
   });
 
-  it("syncProjects does not auto-collapse projects from persisted project state", () => {
+  it("syncProjects does not auto-collapse projects from new-shape persisted project state", () => {
     const project1 = ProjectId.make("project-1");
     const project2 = ProjectId.make("project-2");
 
     hydratePersistedProjectStateForTests({
+      collapsedProjectCwds: [],
       expandedProjectCwds: ["/tmp/project-1"],
       projectOrderCwds: ["/tmp/project-1", "/tmp/project-2"],
     });

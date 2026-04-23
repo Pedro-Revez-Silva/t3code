@@ -35,8 +35,10 @@ import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.t
 import { makeProviderServiceLive } from "./ProviderService.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ProviderThreadMirrorRepositoryLive } from "../../persistence/Layers/ProviderThreadMirrors.ts";
 import { ProviderSessionRuntimeRepositoryLive } from "../../persistence/Layers/ProviderSessionRuntime.ts";
 import { ProviderSessionRuntimeRepository } from "../../persistence/Services/ProviderSessionRuntime.ts";
+import { ProviderThreadMirrorRepository } from "../../persistence/Services/ProviderThreadMirrors.ts";
 import {
   makeSqlitePersistenceLive,
   SqlitePersistenceMemory,
@@ -246,6 +248,7 @@ function makeProviderServiceLayer() {
   const codex = makeFakeCodexAdapter();
   const claude = makeFakeCodexAdapter("claudeAgent");
   const cursor = makeFakeCodexAdapter("cursor");
+  const opencode = makeFakeCodexAdapter("opencode");
   const registry: typeof ProviderAdapterRegistry.Service = {
     getByProvider: (provider) =>
       provider === "codex"
@@ -254,12 +257,17 @@ function makeProviderServiceLayer() {
           ? Effect.succeed(claude.adapter)
           : provider === "cursor"
             ? Effect.succeed(cursor.adapter)
-            : Effect.fail(new ProviderUnsupportedError({ provider })),
-    listProviders: () => Effect.succeed(["codex", "claudeAgent", "cursor"]),
+            : provider === "opencode"
+              ? Effect.succeed(opencode.adapter)
+              : Effect.fail(new ProviderUnsupportedError({ provider })),
+    listProviders: () => Effect.succeed(["codex", "claudeAgent", "cursor", "opencode"]),
   };
 
   const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registry);
   const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const mirrorRepositoryLayer = ProviderThreadMirrorRepositoryLive.pipe(
     Layer.provide(SqlitePersistenceMemory),
   );
   const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
@@ -269,12 +277,14 @@ function makeProviderServiceLayer() {
       makeProviderServiceLive().pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
+        Layer.provide(mirrorRepositoryLayer),
         Layer.provide(defaultServerSettingsLayer),
         Layer.provideMerge(AnalyticsService.layerTest),
       ),
       directoryLayer,
 
       runtimeRepositoryLayer,
+      mirrorRepositoryLayer,
       NodeServices.layer,
     ),
   );
@@ -283,6 +293,7 @@ function makeProviderServiceLayer() {
     codex,
     claude,
     cursor,
+    opencode,
     layer,
   };
 }
@@ -311,10 +322,14 @@ it.effect("ProviderServiceLive rejects new sessions for disabled providers", () 
     const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
       Layer.provide(SqlitePersistenceMemory),
     );
+    const mirrorRepositoryLayer = ProviderThreadMirrorRepositoryLive.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
     const providerLayer = makeProviderServiceLive().pipe(
       Layer.provide(providerAdapterLayer),
       Layer.provide(directoryLayer),
+      Layer.provide(mirrorRepositoryLayer),
       Layer.provide(serverSettingsLayer),
       Layer.provide(AnalyticsService.layerTest),
     );
@@ -353,6 +368,9 @@ it.effect("ProviderServiceLive writes canonical events to the emitting thread se
     const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
       Layer.provide(SqlitePersistenceMemory),
     );
+    const mirrorRepositoryLayer = ProviderThreadMirrorRepositoryLive.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
     const providerLayer = makeProviderServiceLive({
       canonicalEventLogger: {
@@ -367,6 +385,7 @@ it.effect("ProviderServiceLive writes canonical events to the emitting thread se
     }).pipe(
       Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
       Layer.provide(directoryLayer),
+      Layer.provide(mirrorRepositoryLayer),
       Layer.provide(defaultServerSettingsLayer),
       Layer.provide(AnalyticsService.layerTest),
     );
@@ -411,6 +430,9 @@ it.effect("ProviderServiceLive keeps persisted resumable sessions on startup", (
     const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
       Layer.provide(persistenceLayer),
     );
+    const mirrorRepositoryLayer = ProviderThreadMirrorRepositoryLive.pipe(
+      Layer.provide(persistenceLayer),
+    );
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
 
     yield* Effect.gen(function* () {
@@ -424,6 +446,7 @@ it.effect("ProviderServiceLive keeps persisted resumable sessions on startup", (
     const providerLayer = makeProviderServiceLive().pipe(
       Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
       Layer.provide(directoryLayer),
+      Layer.provide(mirrorRepositoryLayer),
       Layer.provide(defaultServerSettingsLayer),
       Layer.provide(AnalyticsService.layerTest),
     );
@@ -468,6 +491,9 @@ it.effect(
       const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
         Layer.provide(persistenceLayer),
       );
+      const mirrorRepositoryLayer = ProviderThreadMirrorRepositoryLive.pipe(
+        Layer.provide(persistenceLayer),
+      );
 
       const firstCodex = makeFakeCodexAdapter();
       const firstRegistry: typeof ProviderAdapterRegistry.Service = {
@@ -484,6 +510,7 @@ it.effect(
       const firstProviderLayer = makeProviderServiceLive().pipe(
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, firstRegistry)),
         Layer.provide(firstDirectoryLayer),
+        Layer.provide(mirrorRepositoryLayer),
         Layer.provide(defaultServerSettingsLayer),
         Layer.provide(AnalyticsService.layerTest),
       );
@@ -536,6 +563,7 @@ it.effect(
       const secondProviderLayer = makeProviderServiceLive().pipe(
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, secondRegistry)),
         Layer.provide(secondDirectoryLayer),
+        Layer.provide(mirrorRepositoryLayer),
         Layer.provide(defaultServerSettingsLayer),
         Layer.provide(AnalyticsService.layerTest),
       );
@@ -812,6 +840,93 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("uses a provider mirror when switching a thread to opencode", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const mirrorRepository = yield* ProviderThreadMirrorRepository;
+      const threadId = asThreadId("thread-opencode-mirror");
+      const previousMirrorSeenAt = "2026-04-21T10:00:00.000Z";
+
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        cwd: "/tmp/project-codex",
+        runtimeMode: "full-access",
+      });
+
+      yield* mirrorRepository.upsert({
+        threadId,
+        providerName: "opencode",
+        externalThreadId: "ses_opencode_mirror",
+        lastSeenAt: previousMirrorSeenAt,
+        lastImportedAt: null,
+        lastExportedAt: "2026-04-21T09:59:00.000Z",
+        resumeCursor: {
+          sessionID: "ses_opencode_mirror",
+          directory: "/tmp/project-opencode",
+        },
+        runtimePayload: {
+          cwd: "/tmp/project-opencode",
+          modelSelection: {
+            provider: "opencode",
+            model: "openai/gpt-5",
+          },
+          exportedFromT3: true,
+        },
+        metadata: {
+          source: "t3-export",
+        },
+      });
+
+      routing.opencode.startSession.mockClear();
+      routing.codex.stopSession.mockClear();
+
+      const switched = yield* provider.startSession(threadId, {
+        provider: "opencode",
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(switched.provider, "opencode");
+      assert.equal(routing.opencode.startSession.mock.calls.length, 1);
+      const startInput = routing.opencode.startSession.mock.calls[0]?.[0];
+      assert.equal(typeof startInput === "object" && startInput !== null, true);
+      if (startInput && typeof startInput === "object") {
+        const startPayload = startInput as {
+          provider?: string;
+          cwd?: string;
+          modelSelection?: unknown;
+          resumeCursor?: unknown;
+        };
+        assert.equal(startPayload.provider, "opencode");
+        assert.equal(startPayload.cwd, "/tmp/project-opencode");
+        assert.deepEqual(startPayload.modelSelection, {
+          provider: "opencode",
+          model: "openai/gpt-5",
+        });
+        assert.deepEqual(startPayload.resumeCursor, {
+          sessionID: "ses_opencode_mirror",
+          directory: "/tmp/project-opencode",
+        });
+      }
+      assert.deepEqual(routing.codex.stopSession.mock.calls, [[threadId]]);
+
+      const persistedMirror = yield* mirrorRepository.getByThreadAndProvider({
+        threadId,
+        providerName: "opencode",
+      });
+      assert.equal(Option.isSome(persistedMirror), true);
+      if (Option.isSome(persistedMirror)) {
+        assert.equal(persistedMirror.value.externalThreadId, "ses_opencode_mirror");
+        assert.deepEqual(persistedMirror.value.resumeCursor, {
+          sessionID: "ses_opencode_mirror",
+          directory: "/tmp/project-opencode",
+        });
+        assert.equal(persistedMirror.value.lastSeenAt > previousMirrorSeenAt, true);
+      }
+    }),
+  );
+
   it.effect("recovers stale sessions for sendTurn using persisted cwd", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -924,6 +1039,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
       yield* routing.codex.stopAll();
       yield* routing.claude.stopAll();
+      yield* routing.cursor.stopAll();
+      yield* routing.opencode.stopAll();
 
       const remaining = yield* provider.listSessions();
       assert.equal(remaining.length, 0);
@@ -934,10 +1051,11 @@ routing.layer("ProviderServiceLive routing", (it) => {
     Effect.gen(function* () {
       const provider = yield* ProviderService;
       const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-runtime-status");
 
-      const session = yield* provider.startSession(asThreadId("thread-1"), {
+      const session = yield* provider.startSession(threadId, {
         provider: "codex",
-        threadId: asThreadId("thread-1"),
+        threadId,
         runtimeMode: "full-access",
       });
       yield* provider.sendTurn({
@@ -981,6 +1099,9 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
         Layer.provide(persistenceLayer),
       );
+      const mirrorRepositoryLayer = ProviderThreadMirrorRepositoryLive.pipe(
+        Layer.provide(persistenceLayer),
+      );
 
       const firstClaude = makeFakeCodexAdapter("claudeAgent");
       const firstRegistry: typeof ProviderAdapterRegistry.Service = {
@@ -996,6 +1117,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const firstProviderLayer = makeProviderServiceLive().pipe(
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, firstRegistry)),
         Layer.provide(firstDirectoryLayer),
+        Layer.provide(mirrorRepositoryLayer),
         Layer.provide(defaultServerSettingsLayer),
         Layer.provide(AnalyticsService.layerTest),
       );
@@ -1029,6 +1151,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const secondProviderLayer = makeProviderServiceLive().pipe(
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, secondRegistry)),
         Layer.provide(secondDirectoryLayer),
+        Layer.provide(mirrorRepositoryLayer),
         Layer.provide(defaultServerSettingsLayer),
         Layer.provide(AnalyticsService.layerTest),
       );

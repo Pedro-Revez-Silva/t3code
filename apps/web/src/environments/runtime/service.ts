@@ -89,6 +89,13 @@ type ThreadDetailSubscriptionEntry = {
 const environmentConnections = new Map<EnvironmentId, EnvironmentConnection>();
 const environmentConnectionListeners = new Set<() => void>();
 const threadDetailSubscriptions = new Map<string, ThreadDetailSubscriptionEntry>();
+const lastAppliedProjectionVersionByEnvironment = new Map<
+  EnvironmentId,
+  {
+    readonly sequence: number;
+    readonly updatedAt: string | null;
+  }
+>();
 
 let activeService: EnvironmentServiceState | null = null;
 let needsProviderInvalidation = false;
@@ -104,6 +111,98 @@ const THREAD_DETAIL_SUBSCRIPTION_IDLE_EVICTION_MS = 15 * 60 * 1000;
 const MAX_CACHED_THREAD_DETAIL_SUBSCRIPTIONS = 32;
 const SNAPSHOT_SYNC_POLL_INTERVAL_MS = 3_000;
 const NOOP = () => undefined;
+
+function compareAppliedProjectionVersion(
+  left: { readonly sequence: number; readonly updatedAt: string | null },
+  right: { readonly sequence: number; readonly updatedAt: string | null },
+): number {
+  if (left.sequence !== right.sequence) {
+    return left.sequence - right.sequence;
+  }
+
+  const leftUpdatedAt = left.updatedAt ?? "";
+  const rightUpdatedAt = right.updatedAt ?? "";
+  if (leftUpdatedAt === rightUpdatedAt) {
+    return 0;
+  }
+
+  return leftUpdatedAt < rightUpdatedAt ? -1 : 1;
+}
+
+function toAppliedProjectionVersion(
+  snapshot: Pick<OrchestrationReadModel, "snapshotSequence" | "updatedAt">,
+): {
+  readonly sequence: number;
+  readonly updatedAt: string;
+} {
+  return {
+    sequence: snapshot.snapshotSequence,
+    updatedAt: snapshot.updatedAt,
+  };
+}
+
+export function shouldApplyProjectionSnapshot(input: {
+  readonly current: {
+    readonly sequence: number;
+    readonly updatedAt: string | null;
+  } | null;
+  readonly next: Pick<OrchestrationReadModel, "snapshotSequence" | "updatedAt">;
+}): boolean {
+  if (input.current === null) {
+    return true;
+  }
+
+  return compareAppliedProjectionVersion(input.current, toAppliedProjectionVersion(input.next)) < 0;
+}
+
+export function shouldApplyProjectionEvent(input: {
+  readonly current: {
+    readonly sequence: number;
+    readonly updatedAt: string | null;
+  } | null;
+  readonly sequence: number;
+}): boolean {
+  if (input.current === null) {
+    return true;
+  }
+
+  return input.sequence > input.current.sequence;
+}
+
+function readLastAppliedProjectionVersion(environmentId: EnvironmentId): {
+  readonly sequence: number;
+  readonly updatedAt: string | null;
+} | null {
+  return lastAppliedProjectionVersionByEnvironment.get(environmentId) ?? null;
+}
+
+function markAppliedProjectionSnapshot(
+  environmentId: EnvironmentId,
+  snapshot: Pick<OrchestrationReadModel, "snapshotSequence" | "updatedAt">,
+): void {
+  const nextVersion = toAppliedProjectionVersion(snapshot);
+  const currentVersion = readLastAppliedProjectionVersion(environmentId);
+  if (
+    currentVersion !== null &&
+    compareAppliedProjectionVersion(currentVersion, nextVersion) >= 0
+  ) {
+    return;
+  }
+
+  lastAppliedProjectionVersionByEnvironment.set(environmentId, nextVersion);
+}
+
+function markAppliedProjectionEvent(environmentId: EnvironmentId, sequence: number): void {
+  const currentVersion = readLastAppliedProjectionVersion(environmentId);
+  if (currentVersion !== null && sequence <= currentVersion.sequence) {
+    return;
+  }
+
+  lastAppliedProjectionVersionByEnvironment.set(environmentId, {
+    sequence,
+    updatedAt: currentVersion?.updatedAt ?? null,
+  });
+}
 
 function getThreadDetailSubscriptionKey(environmentId: EnvironmentId, threadId: ThreadId): string {
   return scopedThreadKey(scopeThreadRef(environmentId, threadId));
@@ -603,6 +702,15 @@ export function applyEnvironmentThreadDetailEvent(
 }
 
 function applyShellEvent(event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) {
+  if (
+    !shouldApplyProjectionEvent({
+      current: readLastAppliedProjectionVersion(environmentId),
+      sequence: event.sequence,
+    })
+  ) {
+    return;
+  }
+
   const threadId =
     event.kind === "thread-upserted"
       ? event.thread.id
@@ -613,6 +721,7 @@ function applyShellEvent(event: OrchestrationShellStreamEvent, environmentId: En
   const previousThread = threadRef ? selectThreadByRef(useStore.getState(), threadRef) : undefined;
 
   useStore.getState().applyShellEvent(event, environmentId);
+  markAppliedProjectionEvent(environmentId, event.sequence);
 
   switch (event.kind) {
     case "project-upserted":
@@ -646,7 +755,17 @@ function createEnvironmentConnectionHandlers() {
   return {
     applyShellEvent,
     syncShellSnapshot: (snapshot: OrchestrationShellSnapshot, environmentId: EnvironmentId) => {
+      if (
+        !shouldApplyProjectionSnapshot({
+          current: readLastAppliedProjectionVersion(environmentId),
+          next: snapshot,
+        })
+      ) {
+        return;
+      }
+
       useStore.getState().syncServerShellSnapshot(snapshot, environmentId);
+      markAppliedProjectionSnapshot(environmentId, snapshot);
       reconcileThreadDetailSubscriptionsForEnvironment(
         environmentId,
         snapshot.threads.map((thread) => thread.id),
@@ -776,6 +895,7 @@ async function removeConnection(environmentId: EnvironmentId): Promise<boolean> 
   }
 
   disposeThreadDetailSubscriptionsForEnvironment(environmentId);
+  lastAppliedProjectionVersionByEnvironment.delete(environmentId);
   environmentConnections.delete(environmentId);
   emitEnvironmentConnectionRegistryChange();
   await connection.dispose();
@@ -1070,7 +1190,7 @@ export function startEnvironmentConnectionService(queryClient: QueryClient): () 
 
   createPrimaryEnvironmentConnection();
   const primaryKnownEnvironment = getPrimaryKnownEnvironment();
-  let lastSnapshotVersion: string | null = null;
+  let snapshotPollInFlight = false;
   const snapshotPollInterval = globalThis.setInterval(() => {
     if (!primaryKnownEnvironment) {
       return;
@@ -1082,15 +1202,23 @@ export function startEnvironmentConnectionService(queryClient: QueryClient): () 
     if (typeof document !== "undefined" && document.hidden) {
       return;
     }
+    if (snapshotPollInFlight) {
+      return;
+    }
 
+    snapshotPollInFlight = true;
     void fetchPrimaryEnvironmentSnapshot()
       .then((snapshot) => {
-        const nextVersion = `${snapshot.snapshotSequence}:${snapshot.updatedAt}`;
-        if (nextVersion === lastSnapshotVersion) {
+        if (
+          !shouldApplyProjectionSnapshot({
+            current: readLastAppliedProjectionVersion(primaryEnvironmentId),
+            next: snapshot,
+          })
+        ) {
           return;
         }
-        lastSnapshotVersion = nextVersion;
         useStore.getState().syncServerReadModel(snapshot, primaryEnvironmentId);
+        markAppliedProjectionSnapshot(primaryEnvironmentId, snapshot);
         reconcileThreadDetailSubscriptionsForEnvironment(
           primaryEnvironmentId,
           snapshot.threads.map((thread) => thread.id),
@@ -1098,7 +1226,10 @@ export function startEnvironmentConnectionService(queryClient: QueryClient): () 
         reconcileThreadDetailSubscriptionEvictionForEnvironment(primaryEnvironmentId);
         reconcileSnapshotDerivedState();
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        snapshotPollInFlight = false;
+      });
   }, SNAPSHOT_SYNC_POLL_INTERVAL_MS);
 
   const unsubscribeSavedEnvironments = useSavedEnvironmentRegistryStore.subscribe(() => {
@@ -1136,6 +1267,7 @@ export function startEnvironmentConnectionService(queryClient: QueryClient): () 
 
 export async function resetEnvironmentServiceForTests(): Promise<void> {
   stopActiveService();
+  lastAppliedProjectionVersionByEnvironment.clear();
   for (const key of Array.from(threadDetailSubscriptions.keys())) {
     disposeThreadDetailSubscriptionByKey(key);
   }

@@ -87,6 +87,11 @@ interface OpenCodeSessionContext {
   readonly sessionScope: Scope.Closeable;
 }
 
+interface OpenCodeResumeState {
+  readonly sessionID: string;
+  readonly directory?: string;
+}
+
 export interface OpenCodeAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
@@ -94,6 +99,33 @@ export interface OpenCodeAdapterLiveOptions {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function readOpenCodeResumeState(resumeCursor: unknown): OpenCodeResumeState | undefined {
+  if (!resumeCursor || typeof resumeCursor !== "object") {
+    return undefined;
+  }
+
+  const cursor = resumeCursor as {
+    sessionID?: unknown;
+    directory?: unknown;
+  };
+  const sessionID =
+    typeof cursor.sessionID === "string" && cursor.sessionID.trim().length > 0
+      ? cursor.sessionID.trim()
+      : undefined;
+  if (!sessionID) {
+    return undefined;
+  }
+
+  const directory =
+    typeof cursor.directory === "string" && cursor.directory.trim().length > 0
+      ? cursor.directory.trim()
+      : undefined;
+  return {
+    sessionID,
+    ...(directory ? { directory } : {}),
+  };
 }
 
 /**
@@ -1002,7 +1034,8 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
           const binaryPath = settings.providers.opencode.binaryPath;
           const serverUrl = settings.providers.opencode.serverUrl;
           const serverPassword = settings.providers.opencode.serverPassword;
-          const directory = input.cwd ?? serverConfig.cwd;
+          const resumeState = readOpenCodeResumeState(input.resumeCursor);
+          const directory = resumeState?.directory ?? input.cwd ?? serverConfig.cwd;
           const existing = sessions.get(input.threadId);
           if (existing) {
             yield* stopOpenCodeContext(existing);
@@ -1025,19 +1058,31 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
                   directory,
                   ...(server.external && serverPassword ? { serverPassword } : {}),
                 });
-                const openCodeSession = yield* runOpenCodeSdk("session.create", () =>
-                  client.session.create({
-                    title: `T3 Code ${input.threadId}`,
-                    permission: buildOpenCodePermissionRules(input.runtimeMode),
-                  }),
-                );
+                const openCodeSession = yield* resumeState
+                  ? runOpenCodeSdk("session.get", () =>
+                      client.session.get({ sessionID: resumeState.sessionID }),
+                    )
+                  : runOpenCodeSdk("session.create", () =>
+                      client.session.create({
+                        title: `T3 Code ${input.threadId}`,
+                        permission: buildOpenCodePermissionRules(input.runtimeMode),
+                      }),
+                    );
                 if (!openCodeSession.data) {
                   return yield* new OpenCodeRuntimeError({
-                    operation: "session.create",
-                    detail: "OpenCode session.create returned no session payload.",
+                    operation: resumeState ? "session.get" : "session.create",
+                    detail: resumeState
+                      ? "OpenCode session.get returned no session payload."
+                      : "OpenCode session.create returned no session payload.",
                   });
                 }
-                return { sessionScope, server, client, openCodeSession: openCodeSession.data };
+                return {
+                  sessionScope,
+                  server,
+                  client,
+                  openCodeSession: openCodeSession.data,
+                  resumed: resumeState !== undefined,
+                };
               }).pipe(Effect.provideService(Scope.Scope, sessionScope)),
             );
             if (Exit.isFailure(startedExit)) {
@@ -1053,21 +1098,28 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
           if (raceWinner) {
             // Another call won the race – clean up the session we just created
             // (including the remote SDK session) and return the existing one.
-            yield* runOpenCodeSdk("session.abort", () =>
-              started.client.session.abort({ sessionID: started.openCodeSession.id }),
-            ).pipe(Effect.ignore);
+            if (!started.resumed) {
+              yield* runOpenCodeSdk("session.abort", () =>
+                started.client.session.abort({ sessionID: started.openCodeSession.id }),
+              ).pipe(Effect.ignore);
+            }
             yield* Scope.close(started.sessionScope, Exit.void).pipe(Effect.ignore);
             return raceWinner.session;
           }
 
           const createdAt = nowIso();
+          const sessionDirectory = started.openCodeSession.directory || directory;
           const session: ProviderSession = {
             provider: PROVIDER,
             status: "ready",
             runtimeMode: input.runtimeMode,
-            cwd: directory,
+            cwd: sessionDirectory,
             ...(input.modelSelection ? { model: input.modelSelection.model } : {}),
             threadId: input.threadId,
+            resumeCursor: {
+              sessionID: started.openCodeSession.id,
+              directory: sessionDirectory,
+            },
             createdAt,
             updatedAt: createdAt,
           };
@@ -1076,7 +1128,7 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
             session,
             client: started.client,
             server: started.server,
-            directory,
+            directory: sessionDirectory,
             openCodeSessionId: started.openCodeSession.id,
             pendingPermissions: new Map(),
             pendingQuestions: new Map(),
