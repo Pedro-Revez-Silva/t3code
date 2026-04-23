@@ -995,9 +995,9 @@ describe("ProviderCommandReactor", () => {
     expect(harness.stopSession.mock.calls.length).toBe(0);
     expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
-      resumeCursor: { opaque: "resume-1" },
       runtimeMode: "approval-required",
     });
+    expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumeCursor");
     expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
     });
