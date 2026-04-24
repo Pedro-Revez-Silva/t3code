@@ -24,12 +24,17 @@ import type { Effect } from "effect";
 import type { Stream } from "effect";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
+export type ProviderResumeCursorInvalidationReason =
+  | "runtime-mode-change"
+  | "cwd-change"
+  | "unsupported-model-change";
 
 export interface ProviderAdapterCapabilities {
   /**
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  readonly resumeCursorInvalidationReasons?: ReadonlyArray<ProviderResumeCursorInvalidationReason>;
 }
 
 export interface ProviderThreadTurnSnapshot {

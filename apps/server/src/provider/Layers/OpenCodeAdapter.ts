@@ -1418,6 +1418,7 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
         provider: PROVIDER,
         capabilities: {
           sessionModelSwitch: "in-session",
+          resumeCursorInvalidationReasons: ["runtime-mode-change", "cwd-change"],
         },
         startSession,
         sendTurn,
