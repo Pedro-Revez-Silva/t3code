@@ -2,7 +2,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { DEFAULT_SERVER_SETTINGS, MessageId, ProjectId, ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  MessageId,
+  ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 import { Effect, Layer, Option, Stream } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -45,6 +52,9 @@ import {
   type ProviderSessionDirectoryShape,
 } from "./provider/Services/ProviderSessionDirectory.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "./serverSettings.ts";
+
+const CODEX_INSTANCE_ID = ProviderInstanceId.make("codex");
+const CLAUDE_PROVIDER = ProviderDriverKind.make("claudeAgent");
 
 function createClaudeFixture(homeDir: string): {
   readonly projectsRoot: string;
@@ -371,7 +381,7 @@ describe("claudeSessionSync", () => {
     expect(refreshCount).toBe(1);
     expect(providerBindings[0]).toMatchObject({
       threadId: fixture.sessionId,
-      provider: "claudeAgent",
+      provider: CLAUDE_PROVIDER,
       resumeCursor: {
         sessionId: fixture.sessionId,
         resume: fixture.sessionId,
@@ -380,7 +390,7 @@ describe("claudeSessionSync", () => {
     });
     expect(providerMirrors[0]).toMatchObject({
       threadId: fixture.sessionId,
-      providerName: "claudeAgent",
+      providerName: CLAUDE_PROVIDER,
       externalThreadId: fixture.sessionId,
     });
   });
@@ -493,7 +503,7 @@ describe("claudeSessionSync", () => {
               projectId,
               title: "Login flow bug",
               modelSelection: {
-                provider: "codex",
+                instanceId: CODEX_INSTANCE_ID,
                 model: "gpt-5.4",
               },
               runtimeMode: "full-access",
@@ -539,7 +549,7 @@ describe("claudeSessionSync", () => {
             projectId,
             title: "Login flow bug",
             modelSelection: {
-              provider: "codex",
+              instanceId: CODEX_INSTANCE_ID,
               model: "gpt-5.4",
             },
             runtimeMode: "full-access",
@@ -625,7 +635,7 @@ describe("claudeSessionSync", () => {
     expect(providerMirrors).toHaveLength(1);
     expect(providerMirrors[0]).toMatchObject({
       threadId,
-      providerName: "claudeAgent",
+      providerName: CLAUDE_PROVIDER,
       lastSeenAt: "2026-04-21T10:05:00.000Z",
       metadata: {
         source: "t3-export",

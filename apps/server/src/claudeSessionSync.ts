@@ -11,6 +11,8 @@ import {
   type ModelSelection,
   type OrchestrationThread,
   type OrchestrationThreadShell,
+  ProviderDriverKind,
+  ProviderInstanceId,
   ThreadId,
   TurnId,
   type ProviderInteractionMode,
@@ -44,6 +46,9 @@ import {
 } from "./sessionSyncShared.ts";
 
 const SESSION_SYNC_INTERVAL = "3 seconds";
+const CLAUDE_PROVIDER = ProviderDriverKind.make("claudeAgent");
+const CLAUDE_INSTANCE_ID = ProviderInstanceId.make("claudeAgent");
+const DEFAULT_CLAUDE_MODEL = DEFAULT_MODEL_BY_PROVIDER[CLAUDE_PROVIDER] ?? "claude-sonnet-4-6";
 
 interface ImportedMessage {
   readonly role: "user" | "assistant";
@@ -189,8 +194,7 @@ function listClaudeSessionIndexFiles(projectsRoot: string): ReadonlyArray<string
     }
   }
 
-  indexFiles.sort((left, right) => left.localeCompare(right));
-  return indexFiles;
+  return indexFiles.toSorted((left, right) => left.localeCompare(right));
 }
 
 function parseClaudeSessionIndex(filePath: string): ReadonlyArray<ClaudeSessionIndexEntry> {
@@ -316,7 +320,7 @@ function parseClaudeSessionFile(entry: ClaudeSessionIndexEntry): ImportedClaudeS
   let createdAt = entry.created ?? undefined;
   let updatedAt = entry.modified ?? undefined;
   let permissionMode: string | undefined;
-  let latestModel = DEFAULT_MODEL_BY_PROVIDER.claudeAgent;
+  let latestModel = DEFAULT_CLAUDE_MODEL;
   let lastAssistantUuid: string | null = null;
 
   for (const line of lines) {
@@ -524,9 +528,9 @@ function loadClaudeSessions(
 }
 
 function resolveClaudeExportModel(modelSelection: ModelSelection): string {
-  return modelSelection.provider === "claudeAgent"
+  return modelSelection.instanceId === CLAUDE_INSTANCE_ID
     ? modelSelection.model
-    : DEFAULT_MODEL_BY_PROVIDER.claudeAgent;
+    : DEFAULT_CLAUDE_MODEL;
 }
 
 function buildClaudeMirrorRuntimePayload(input: {
@@ -539,7 +543,7 @@ function buildClaudeMirrorRuntimePayload(input: {
     cwd: input.workspaceRoot,
     model: input.model,
     modelSelection: {
-      provider: "claudeAgent",
+      instanceId: CLAUDE_INSTANCE_ID,
       model: input.model,
     },
     importedFromClaude: input.importedFromClaude,
@@ -867,7 +871,7 @@ export const launchClaudeSessionSync: Effect.Effect<
         workspaceRoot: session.workspaceRoot,
         projectTitle: session.projectTitle,
         defaultModelSelection: {
-          provider: "claudeAgent",
+          instanceId: CLAUDE_INSTANCE_ID,
           model: session.model,
         },
         createdAt: session.createdAt,
@@ -879,7 +883,7 @@ export const launchClaudeSessionSync: Effect.Effect<
         projectId: canonicalProjectId,
         title: session.title,
         modelSelection: {
-          provider: "claudeAgent",
+          instanceId: CLAUDE_INSTANCE_ID,
           model: session.model,
         },
         runtimeMode: session.runtimeMode,
@@ -930,7 +934,8 @@ export const launchClaudeSessionSync: Effect.Effect<
       yield* projectionThreadSessions.upsert({
         threadId: canonicalThreadId,
         status: session.status,
-        providerName: "claudeAgent",
+        providerName: CLAUDE_PROVIDER,
+        providerInstanceId: CLAUDE_INSTANCE_ID,
         runtimeMode: session.runtimeMode,
         activeTurnId: session.activeTurnId,
         lastError: null,
@@ -946,7 +951,8 @@ export const launchClaudeSessionSync: Effect.Effect<
 
       yield* providerSessionDirectory.upsert({
         threadId: canonicalThreadId,
-        provider: "claudeAgent",
+        provider: CLAUDE_PROVIDER,
+        providerInstanceId: CLAUDE_INSTANCE_ID,
         runtimeMode: session.runtimeMode,
         status: "stopped",
         resumeCursor,
@@ -960,7 +966,7 @@ export const launchClaudeSessionSync: Effect.Effect<
 
       yield* providerThreadMirrorRepository.upsert({
         threadId: canonicalThreadId,
-        providerName: "claudeAgent",
+        providerName: CLAUDE_PROVIDER,
         externalThreadId: session.externalThreadId,
         lastSeenAt: session.updatedAt,
         lastImportedAt: new Date().toISOString(),
@@ -1019,7 +1025,7 @@ export const launchClaudeSessionSync: Effect.Effect<
       const now = new Date().toISOString();
       yield* providerThreadMirrorRepository.upsert({
         threadId: thread.id,
-        providerName: "claudeAgent",
+        providerName: CLAUDE_PROVIDER,
         externalThreadId,
         lastSeenAt: thread.updatedAt,
         lastImportedAt: existingMirror?.lastImportedAt ?? null,

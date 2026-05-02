@@ -3,7 +3,14 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 
-import { DEFAULT_SERVER_SETTINGS, MessageId, ProjectId, ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  MessageId,
+  ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 import { Effect, Layer, Option, Stream } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -50,6 +57,9 @@ import {
 } from "./provider/Services/ProviderSessionDirectory.ts";
 import { OpenCodeRuntime, type OpenCodeRuntimeShape } from "./provider/opencodeRuntime.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "./serverSettings.ts";
+
+const CODEX_INSTANCE_ID = ProviderInstanceId.make("codex");
+const OPENCODE_PROVIDER = ProviderDriverKind.make("opencode");
 
 function createOpenCodeFixtureDatabase(databasePath: string): void {
   mkdirSync(dirname(databasePath), { recursive: true });
@@ -445,7 +455,7 @@ describe("openCodeSessionSync", () => {
     expect(refreshCount).toBe(1);
     expect(providerBindings[0]).toMatchObject({
       threadId: "ses_fixture",
-      provider: "opencode",
+      provider: OPENCODE_PROVIDER,
       resumeCursor: {
         sessionID: "ses_fixture",
         directory: "/Users/pedrosilva/Repos/demo-project",
@@ -475,7 +485,7 @@ describe("openCodeSessionSync", () => {
     const providerMirrors: Array<Parameters<ProviderThreadMirrorRepositoryShape["upsert"]>[0]> = [
       {
         threadId: ThreadId.make("thread-existing"),
-        providerName: "opencode",
+        providerName: OPENCODE_PROVIDER,
         externalThreadId: "ses_fixture",
         lastSeenAt: "2026-04-20T00:00:00.000Z",
         lastImportedAt: null,
@@ -651,7 +661,7 @@ describe("openCodeSessionSync", () => {
         projectId,
         title: "Landing page polish",
         modelSelection: {
-          provider: "codex",
+          instanceId: CODEX_INSTANCE_ID,
           model: "gpt-5.4",
         },
         runtimeMode: "full-access",
@@ -827,7 +837,7 @@ describe("openCodeSessionSync", () => {
               projectId,
               title: "Landing page polish",
               modelSelection: {
-                provider: "codex",
+                instanceId: CODEX_INSTANCE_ID,
                 model: "gpt-5.4",
               },
               runtimeMode: "full-access",
@@ -873,7 +883,7 @@ describe("openCodeSessionSync", () => {
             projectId,
             title: "Landing page polish",
             modelSelection: {
-              provider: "codex",
+              instanceId: CODEX_INSTANCE_ID,
               model: "gpt-5.4",
             },
             runtimeMode: "full-access",
@@ -998,7 +1008,7 @@ describe("openCodeSessionSync", () => {
     expect(providerMirrors).toHaveLength(1);
     expect(providerMirrors[0]).toMatchObject({
       threadId,
-      providerName: "opencode",
+      providerName: OPENCODE_PROVIDER,
       lastSeenAt: "2026-04-21T10:05:00.000Z",
       metadata: {
         source: "t3-export",

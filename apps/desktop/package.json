@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/desktop",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.cjs",
@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "effect": "catalog:",
-    "electron": "40.6.0",
+    "electron": "40.9.3",
     "electron-updater": "^6.6.2"
   },
   "devDependencies": {

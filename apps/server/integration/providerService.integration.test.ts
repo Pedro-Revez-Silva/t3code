@@ -1,13 +1,17 @@
 import type { ProviderRuntimeEvent } from "@t3tools/contracts";
-import { ThreadId } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts/settings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, assert } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Path, Queue, Stream } from "effect";
 
-import { ProviderUnsupportedError } from "../src/provider/Errors.ts";
 import { ProviderAdapterRegistry } from "../src/provider/Services/ProviderAdapterRegistry.ts";
+import { makeAdapterRegistryMock } from "../src/provider/testUtils/providerAdapterRegistryMock.ts";
 import { ProviderSessionDirectoryLive } from "../src/provider/Layers/ProviderSessionDirectory.ts";
+import {
+  NoOpProviderEventLoggers,
+  ProviderEventLoggers,
+} from "../src/provider/Layers/ProviderEventLoggers.ts";
 import { makeProviderServiceLive } from "../src/provider/Layers/ProviderService.ts";
 import {
   ProviderService,
@@ -30,6 +34,8 @@ import {
   codexTurnTextFixture,
 } from "./fixtures/providerRuntime.ts";
 
+const codexInstanceId = ProviderInstanceId.make("codex");
+
 const makeWorkspaceDirectory = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
@@ -48,13 +54,9 @@ const makeIntegrationFixture = Effect.gen(function* () {
   const cwd = yield* makeWorkspaceDirectory;
   const harness = yield* makeTestProviderAdapterHarness();
 
-  const registry: typeof ProviderAdapterRegistry.Service = {
-    getByProvider: (provider) =>
-      provider === "codex"
-        ? Effect.succeed(harness.adapter)
-        : Effect.fail(new ProviderUnsupportedError({ provider })),
-    listProviders: () => Effect.succeed(["codex"]),
-  };
+  const registry = makeAdapterRegistryMock({
+    [ProviderDriverKind.make("codex")]: harness.adapter,
+  });
 
   const directoryLayer = ProviderSessionDirectoryLive.pipe(
     Layer.provide(ProviderSessionRuntimeRepositoryLive),
@@ -67,6 +69,7 @@ const makeIntegrationFixture = Effect.gen(function* () {
     Layer.succeed(ProviderAdapterRegistry, registry),
     ServerSettingsService.layerTest(DEFAULT_SERVER_SETTINGS),
     AnalyticsService.layerTest,
+    Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
   ).pipe(Layer.provide(SqlitePersistenceMemory));
 
   const layer = makeProviderServiceLive().pipe(Layer.provide(shared));
@@ -127,7 +130,8 @@ it.live("replays typed runtime fixture events", () =>
       const provider = yield* ProviderService;
       const session = yield* provider.startSession(ThreadId.make("thread-integration-typed"), {
         threadId: ThreadId.make("thread-integration-typed"),
-        provider: "codex",
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
         cwd: fixture.cwd,
         runtimeMode: "full-access",
       });
@@ -145,6 +149,10 @@ it.live("replays typed runtime fixture events", () =>
         observedEvents.map((event) => event.type),
         codexTurnTextFixture.map((event) => event.type),
       );
+      assert.deepEqual(
+        observedEvents.map((event) => event.providerInstanceId),
+        codexTurnTextFixture.map(() => codexInstanceId),
+      );
     }).pipe(Effect.provide(fixture.layer));
   }).pipe(Effect.provide(NodeServices.layer)),
 );
@@ -159,7 +167,8 @@ it.live("replays file-changing fixture turn events", () =>
       const provider = yield* ProviderService;
       const session = yield* provider.startSession(ThreadId.make("thread-integration-tools"), {
         threadId: ThreadId.make("thread-integration-tools"),
-        provider: "codex",
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
         cwd: fixture.cwd,
         runtimeMode: "full-access",
       });
@@ -195,7 +204,8 @@ it.live("runs multi-turn tool/approval flow", () =>
       const provider = yield* ProviderService;
       const session = yield* provider.startSession(ThreadId.make("thread-integration-multi"), {
         threadId: ThreadId.make("thread-integration-multi"),
-        provider: "codex",
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
         cwd: fixture.cwd,
         runtimeMode: "full-access",
       });
@@ -246,7 +256,8 @@ it.live("rolls back provider conversation state only", () =>
       const provider = yield* ProviderService;
       const session = yield* provider.startSession(ThreadId.make("thread-integration-rollback"), {
         threadId: ThreadId.make("thread-integration-rollback"),
-        provider: "codex",
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
         cwd: fixture.cwd,
         runtimeMode: "full-access",
       });

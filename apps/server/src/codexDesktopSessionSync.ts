@@ -7,8 +7,10 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
   ThreadId,
   TurnId,
+  ProviderInstanceId,
   type ProviderInteractionMode,
   type RuntimeMode,
 } from "@t3tools/contracts";
@@ -38,6 +40,8 @@ import {
 
 const SESSION_SYNC_INTERVAL = "3 seconds";
 const DESKTOP_RUNNING_SESSION_FRESHNESS_MS = 2 * 60 * 1000;
+const CODEX_PROVIDER = ProviderDriverKind.make("codex");
+const CODEX_INSTANCE_ID = ProviderInstanceId.make("codex");
 
 interface SessionIndexEntry {
   readonly threadName: string | null;
@@ -131,8 +135,7 @@ function listJsonlFiles(root: string): ReadonlyArray<string> {
     }
   }
 
-  files.sort((left, right) => left.localeCompare(right));
-  return files;
+  return files.toSorted((left, right) => left.localeCompare(right));
 }
 
 function parseSessionIndex(filePath: string): Map<string, SessionIndexEntry> {
@@ -416,7 +419,7 @@ function appendSessionIndexUpdates(
       const existing = sessionIndex.get(session.threadId);
       return existing?.threadName !== session.title || existing?.updatedAt !== session.updatedAt;
     })
-    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+    .toSorted((left, right) => left.updatedAt.localeCompare(right.updatedAt));
 
   if (pendingEntries.length === 0) {
     return false;
@@ -493,7 +496,7 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
         workspaceRoot: session.workspaceRoot,
         projectTitle: session.projectTitle,
         defaultModelSelection: {
-          provider: "codex",
+          instanceId: CODEX_INSTANCE_ID,
           model: session.model,
         },
         createdAt: session.createdAt,
@@ -505,7 +508,7 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
         projectId: canonicalProjectId,
         title: session.title,
         modelSelection: {
-          provider: "codex",
+          instanceId: CODEX_INSTANCE_ID,
           model: session.model,
         },
         runtimeMode: session.runtimeMode,
@@ -556,7 +559,8 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
       yield* projectionThreadSessions.upsert({
         threadId: session.threadId,
         status: session.status,
-        providerName: "codex",
+        providerName: CODEX_PROVIDER,
+        providerInstanceId: CODEX_INSTANCE_ID,
         runtimeMode: session.runtimeMode,
         activeTurnId: session.activeTurnId,
         lastError: null,
@@ -565,7 +569,8 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
 
       yield* providerSessionDirectory.upsert({
         threadId: session.threadId,
-        provider: "codex",
+        provider: CODEX_PROVIDER,
+        providerInstanceId: CODEX_INSTANCE_ID,
         runtimeMode: session.runtimeMode,
         status: session.status === "running" ? "running" : "stopped",
         resumeCursor: {
@@ -575,7 +580,7 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
           cwd: session.workspaceRoot,
           model: session.model,
           modelSelection: {
-            provider: "codex",
+            instanceId: CODEX_INSTANCE_ID,
             model: session.model,
           },
           importedFromDesktopCodex: true,
@@ -584,7 +589,7 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
 
       yield* providerThreadMirrorRepository.upsert({
         threadId: session.threadId,
-        providerName: "codex",
+        providerName: CODEX_PROVIDER,
         externalThreadId: session.threadId,
         lastSeenAt: session.updatedAt,
         lastImportedAt: new Date().toISOString(),
@@ -596,7 +601,7 @@ export const launchCodexDesktopSessionSync: Effect.Effect<
           cwd: session.workspaceRoot,
           model: session.model,
           modelSelection: {
-            provider: "codex",
+            instanceId: CODEX_INSTANCE_ID,
             model: session.model,
           },
           importedFromDesktopCodex: true,

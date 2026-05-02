@@ -12,6 +12,8 @@ import {
   type ModelSelection,
   type OrchestrationThread,
   type OrchestrationThreadShell,
+  ProviderDriverKind,
+  ProviderInstanceId,
   ThreadId,
   TurnId,
   type ProviderInteractionMode,
@@ -46,6 +48,9 @@ import {
 } from "./sessionSyncShared.ts";
 
 const SESSION_SYNC_INTERVAL = "3 seconds";
+const OPENCODE_PROVIDER = ProviderDriverKind.make("opencode");
+const OPENCODE_INSTANCE_ID = ProviderInstanceId.make("opencode");
+const DEFAULT_OPENCODE_MODEL = DEFAULT_MODEL_BY_PROVIDER[OPENCODE_PROVIDER] ?? "openai/gpt-5";
 
 interface ImportedMessage {
   readonly role: "user" | "assistant";
@@ -264,7 +269,7 @@ function normalizeOpenCodeSlug(value: string): string {
 }
 
 function resolveOpenCodeExportModel(modelSelection: ModelSelection): OpenCodeExportModel {
-  if (modelSelection.provider === "opencode") {
+  if (modelSelection.instanceId === OPENCODE_INSTANCE_ID) {
     const parsedCurrent = parseOpenCodeModelSlug(modelSelection.model);
     if (parsedCurrent) {
       return {
@@ -275,10 +280,10 @@ function resolveOpenCodeExportModel(modelSelection: ModelSelection): OpenCodeExp
     }
   }
 
-  const parsedDefault = parseOpenCodeModelSlug(DEFAULT_MODEL_BY_PROVIDER.opencode);
+  const parsedDefault = parseOpenCodeModelSlug(DEFAULT_OPENCODE_MODEL);
   if (parsedDefault) {
     return {
-      slug: DEFAULT_MODEL_BY_PROVIDER.opencode,
+      slug: DEFAULT_OPENCODE_MODEL,
       providerID: parsedDefault.providerID,
       modelID: parsedDefault.modelID,
     };
@@ -301,7 +306,7 @@ function buildOpenCodeMirrorRuntimePayload(input: {
     cwd: input.workspaceRoot,
     model: input.model,
     modelSelection: {
-      provider: "opencode",
+      instanceId: OPENCODE_INSTANCE_ID,
       model: input.model,
     },
     importedFromOpenCode: input.importedFromOpenCode,
@@ -595,7 +600,7 @@ function loadOpenCodeSessions(databasePath: string): ReadonlyArray<ImportedOpenC
 
       const importedMessages: ImportedMessage[] = [];
       const importedActivities: ImportedActivity[] = [];
-      let latestModel = DEFAULT_MODEL_BY_PROVIDER.opencode;
+      let latestModel = DEFAULT_OPENCODE_MODEL;
 
       for (const message of messages) {
         const payload = parseJsonRecord(message.data);
@@ -765,7 +770,7 @@ export const launchOpenCodeSessionSync: Effect.Effect<
         workspaceRoot: session.workspaceRoot,
         projectTitle: session.projectTitle,
         defaultModelSelection: {
-          provider: "opencode",
+          instanceId: OPENCODE_INSTANCE_ID,
           model: session.model,
         },
         createdAt: session.createdAt,
@@ -777,7 +782,7 @@ export const launchOpenCodeSessionSync: Effect.Effect<
         projectId: canonicalProjectId,
         title: session.title,
         modelSelection: {
-          provider: "opencode",
+          instanceId: OPENCODE_INSTANCE_ID,
           model: session.model,
         },
         runtimeMode: session.runtimeMode,
@@ -828,7 +833,8 @@ export const launchOpenCodeSessionSync: Effect.Effect<
       yield* projectionThreadSessions.upsert({
         threadId: canonicalThreadId,
         status: session.status,
-        providerName: "opencode",
+        providerName: OPENCODE_PROVIDER,
+        providerInstanceId: OPENCODE_INSTANCE_ID,
         runtimeMode: session.runtimeMode,
         activeTurnId: session.activeTurnId,
         lastError: null,
@@ -837,7 +843,8 @@ export const launchOpenCodeSessionSync: Effect.Effect<
 
       yield* providerSessionDirectory.upsert({
         threadId: canonicalThreadId,
-        provider: "opencode",
+        provider: OPENCODE_PROVIDER,
+        providerInstanceId: OPENCODE_INSTANCE_ID,
         runtimeMode: session.runtimeMode,
         status: "stopped",
         resumeCursor: {
@@ -854,7 +861,7 @@ export const launchOpenCodeSessionSync: Effect.Effect<
 
       yield* providerThreadMirrorRepository.upsert({
         threadId: canonicalThreadId,
-        providerName: "opencode",
+        providerName: OPENCODE_PROVIDER,
         externalThreadId: session.externalThreadId,
         lastSeenAt: session.updatedAt,
         lastImportedAt: new Date().toISOString(),
@@ -935,7 +942,7 @@ export const launchOpenCodeSessionSync: Effect.Effect<
       const exportModel = resolveOpenCodeExportModel(thread.modelSelection);
       yield* providerThreadMirrorRepository.upsert({
         threadId: thread.id,
-        providerName: "opencode",
+        providerName: OPENCODE_PROVIDER,
         externalThreadId,
         lastSeenAt: thread.updatedAt,
         lastImportedAt: existingMirror?.lastImportedAt ?? null,

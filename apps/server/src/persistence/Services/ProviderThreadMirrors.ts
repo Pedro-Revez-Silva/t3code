@@ -1,4 +1,4 @@
-import { IsoDateTime, ProviderKind, ThreadId } from "@t3tools/contracts";
+import { IsoDateTime, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
 import { Context, Option, Schema } from "effect";
 import type { Effect } from "effect";
 
@@ -6,7 +6,7 @@ import type { ProviderSessionRuntimeRepositoryError } from "../Errors.ts";
 
 export const ProviderThreadMirror = Schema.Struct({
   threadId: ThreadId,
-  providerName: ProviderKind,
+  providerName: ProviderDriverKind,
   externalThreadId: Schema.NullOr(Schema.String),
   lastSeenAt: IsoDateTime,
   lastImportedAt: Schema.NullOr(IsoDateTime),
@@ -19,7 +19,7 @@ export type ProviderThreadMirror = typeof ProviderThreadMirror.Type;
 
 export const GetProviderThreadMirrorInput = Schema.Struct({
   threadId: ThreadId,
-  providerName: ProviderKind,
+  providerName: ProviderDriverKind,
 });
 export type GetProviderThreadMirrorInput = typeof GetProviderThreadMirrorInput.Type;
 

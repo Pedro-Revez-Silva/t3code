@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, ProviderDriverKind } from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 import { Effect, Layer, Option, Stream } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -45,6 +45,8 @@ import {
   type ProviderSessionDirectoryShape,
 } from "./provider/Services/ProviderSessionDirectory.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "./serverSettings.ts";
+
+const CODEX_PROVIDER = ProviderDriverKind.make("codex");
 
 describe("codexDesktopSessionSync", () => {
   it("parses the latest session index entry per thread and ignores invalid lines", () => {
@@ -517,7 +519,7 @@ describe("codexDesktopSessionSync", () => {
     ]);
     expect(providerMirrors[0]).toMatchObject({
       threadId: "thread-1",
-      providerName: "codex",
+      providerName: CODEX_PROVIDER,
       externalThreadId: "thread-1",
       metadata: expect.objectContaining({
         source: "desktop-codex",

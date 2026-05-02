@@ -2,7 +2,7 @@ import {
   type EnvironmentId,
   ProjectId,
   type ModelSelection,
-  type ProviderKind,
+  type ProviderDriverKind,
   type ScopedThreadRef,
   type ThreadId,
   type TurnId,
@@ -228,9 +228,9 @@ export function threadHasStarted(thread: Thread | null | undefined): boolean {
 
 export function deriveLockedProvider(input: {
   thread: Thread | null | undefined;
-  selectedProvider: ProviderKind | null;
-  threadProvider: ProviderKind | null;
-}): ProviderKind | null {
+  selectedProvider: string | null;
+  threadProvider: string | null;
+}): ProviderDriverKind | null {
   void input;
   return null;
 }
