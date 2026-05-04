@@ -463,6 +463,7 @@ describe("codexDesktopSessionSync", () => {
       streamChanges: Stream.empty,
     };
     const projectionSnapshotQuery = {
+      getCommandReadModel: () => Effect.die("not implemented"),
       getSnapshot: () =>
         Effect.succeed({
           snapshotSequence: 0,
@@ -471,6 +472,7 @@ describe("codexDesktopSessionSync", () => {
           updatedAt: "2026-04-07T18:00:16.000Z",
         }),
       getShellSnapshot: () => Effect.die("not implemented"),
+      getSnapshotSequence: () => Effect.die("not implemented"),
       getCounts: () => Effect.die("not implemented"),
       getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
       getProjectShellById: () => Effect.succeed(Option.none()),

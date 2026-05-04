@@ -78,7 +78,7 @@ export interface OrchestrationEngineShape {
  * ```ts
  * const program = Effect.gen(function* () {
  *   const engine = yield* OrchestrationEngineService
- *   return yield* engine.getReadModel()
+ *   return yield* engine.dispatch(command)
  * })
  * ```
  */

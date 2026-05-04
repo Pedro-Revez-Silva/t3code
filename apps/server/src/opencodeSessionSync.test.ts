@@ -365,6 +365,7 @@ describe("openCodeSessionSync", () => {
       deleteByThreadAndProvider: () => Effect.void,
     };
     const projectionSnapshotQuery: ProjectionSnapshotQueryShape = {
+      getCommandReadModel: () => Effect.die("not implemented"),
       getSnapshot: () =>
         Effect.succeed({
           snapshotSequence: 0,
@@ -379,6 +380,7 @@ describe("openCodeSessionSync", () => {
           threads: [],
           updatedAt: "2026-04-21T00:00:00.000Z",
         }),
+      getSnapshotSequence: () => Effect.die("not implemented"),
       getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
       getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
       getProjectShellById: () => Effect.die("not implemented"),
@@ -561,6 +563,7 @@ describe("openCodeSessionSync", () => {
       deleteByThreadAndProvider: () => Effect.void,
     };
     const projectionSnapshotQuery: ProjectionSnapshotQueryShape = {
+      getCommandReadModel: () => Effect.die("not implemented"),
       getSnapshot: () =>
         Effect.succeed({
           snapshotSequence: 0,
@@ -575,6 +578,7 @@ describe("openCodeSessionSync", () => {
           threads: [],
           updatedAt: "2026-04-21T00:00:00.000Z",
         }),
+      getSnapshotSequence: () => Effect.die("not implemented"),
       getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
       getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
       getProjectShellById: () => Effect.die("not implemented"),
@@ -797,6 +801,7 @@ describe("openCodeSessionSync", () => {
       listBindings: () => Effect.succeed([]),
     };
     const projectionSnapshotQuery: ProjectionSnapshotQueryShape = {
+      getCommandReadModel: () => Effect.die("not implemented"),
       getSnapshot: () =>
         Effect.succeed({
           snapshotSequence: 1,
@@ -857,6 +862,7 @@ describe("openCodeSessionSync", () => {
           ],
           updatedAt: "2026-04-21T10:05:00.000Z",
         }),
+      getSnapshotSequence: () => Effect.die("not implemented"),
       getCounts: () => Effect.succeed({ projectCount: 1, threadCount: 1 }),
       getActiveProjectByWorkspaceRoot: () =>
         Effect.succeed(
