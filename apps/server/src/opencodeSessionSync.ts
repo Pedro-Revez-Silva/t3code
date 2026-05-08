@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics importFromBarrel:off
+// @effect-diagnostics globalDate:off
+// @effect-diagnostics globalDateInEffect:off
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, parse } from "node:path";

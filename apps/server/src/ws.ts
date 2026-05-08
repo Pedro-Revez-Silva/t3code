@@ -1,4 +1,13 @@
-import { Cause, Duration, Effect, Layer, Option, Queue, Ref, Schema, Stream } from "effect";
+import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import {
   type AuthAccessStreamEvent,
   AuthSessionId,
@@ -40,6 +49,7 @@ import {
   observeRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import { ProviderRegistry } from "./provider/Services/ProviderRegistry.ts";
+import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup.ts";
 import { redactServerSettingsForClient, ServerSettingsService } from "./serverSettings.ts";
@@ -54,6 +64,8 @@ import { ProjectSetupScriptRunner } from "./project/Services/ProjectSetupScriptR
 import { RepositoryIdentityResolver } from "./project/Services/RepositoryIdentityResolver.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
+import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
+import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as SourceControlDiscoveryLayer from "./sourceControl/SourceControlDiscovery.ts";
 import { SourceControlRepositoryService } from "./sourceControl/SourceControlRepositoryService.ts";
 import * as AzureDevOpsCli from "./sourceControl/AzureDevOpsCli.ts";
@@ -74,6 +86,10 @@ import {
   type SessionCredentialChange,
 } from "./auth/Services/SessionCredentialService.ts";
 import { respondToAuthError } from "./auth/http.ts";
+const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
+const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
+
+const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
   OrchestrationEvent,
@@ -152,6 +168,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
       const terminalManager = yield* TerminalManager;
       const providerRegistry = yield* ProviderRegistry;
+      const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const config = yield* ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents;
       const serverSettings = yield* ServerSettingsService;
@@ -166,6 +183,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
       const sourceControlRepositories = yield* SourceControlRepositoryService;
       const bootstrapCredentials = yield* BootstrapCredentialService;
       const sessions = yield* SessionCredentialService;
+      const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const serverCommandId = (tag: string) =>
         CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
 
@@ -200,7 +218,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
         });
 
       const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
-        Schema.is(OrchestrationDispatchCommandError)(cause)
+        isOrchestrationDispatchCommandError(cause)
           ? cause
           : new OrchestrationDispatchCommandError({
               message: cause instanceof Error ? cause.message : fallbackMessage,
@@ -209,7 +227,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
 
       const toBootstrapDispatchCommandCauseError = (cause: Cause.Cause<unknown>) => {
         const error = Cause.squash(cause);
-        return Schema.is(OrchestrationDispatchCommandError)(error)
+        return isOrchestrationDispatchCommandError(error)
           ? error
           : new OrchestrationDispatchCommandError({
               message:
@@ -373,83 +391,86 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             readonly scriptId: string;
             readonly scriptName: string;
             readonly terminalId: string;
-          }) => {
-            const payload = {
-              scriptId: input.scriptId,
-              scriptName: input.scriptName,
-              terminalId: input.terminalId,
-              worktreePath: input.worktreePath,
-            };
-            return Effect.all([
-              appendSetupScriptActivity({
-                threadId: command.threadId,
-                kind: "setup-script.requested",
-                summary: "Starting setup script",
-                createdAt: input.requestedAt,
-                payload,
-                tone: "info",
-              }),
-              appendSetupScriptActivity({
-                threadId: command.threadId,
-                kind: "setup-script.started",
-                summary: "Setup script started",
-                createdAt: new Date().toISOString(),
-                payload,
-                tone: "info",
-              }),
-            ]).pipe(
-              Effect.asVoid,
-              Effect.catch((error) =>
-                Effect.logWarning(
-                  "bootstrap turn start launched setup script but failed to record setup activity",
-                  {
-                    threadId: command.threadId,
-                    worktreePath: input.worktreePath,
-                    scriptId: input.scriptId,
-                    terminalId: input.terminalId,
-                    detail: error.message,
-                  },
+          }) =>
+            Effect.gen(function* () {
+              const startedAt = yield* nowIso;
+              const payload = {
+                scriptId: input.scriptId,
+                scriptName: input.scriptName,
+                terminalId: input.terminalId,
+                worktreePath: input.worktreePath,
+              };
+              yield* Effect.all([
+                appendSetupScriptActivity({
+                  threadId: command.threadId,
+                  kind: "setup-script.requested",
+                  summary: "Starting setup script",
+                  createdAt: input.requestedAt,
+                  payload,
+                  tone: "info",
+                }),
+                appendSetupScriptActivity({
+                  threadId: command.threadId,
+                  kind: "setup-script.started",
+                  summary: "Setup script started",
+                  createdAt: startedAt,
+                  payload,
+                  tone: "info",
+                }),
+              ]).pipe(
+                Effect.asVoid,
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    "bootstrap turn start launched setup script but failed to record setup activity",
+                    {
+                      threadId: command.threadId,
+                      worktreePath: input.worktreePath,
+                      scriptId: input.scriptId,
+                      terminalId: input.terminalId,
+                      detail: error.message,
+                    },
+                  ),
                 ),
-              ),
-            );
-          };
+              );
+            });
 
           const runSetupProgram = () =>
-            bootstrap?.runSetupScript && targetWorktreePath
-              ? (() => {
-                  const worktreePath = targetWorktreePath;
-                  const requestedAt = new Date().toISOString();
-                  return projectSetupScriptRunner
-                    .runForThread({
-                      threadId: command.threadId,
-                      ...(targetProjectId ? { projectId: targetProjectId } : {}),
-                      ...(targetProjectCwd ? { projectCwd: targetProjectCwd } : {}),
-                      worktreePath,
-                    })
-                    .pipe(
-                      Effect.matchEffect({
-                        onFailure: (error) =>
-                          recordSetupScriptLaunchFailure({
-                            error,
-                            requestedAt,
-                            worktreePath,
-                          }),
-                        onSuccess: (setupResult) => {
-                          if (setupResult.status !== "started") {
-                            return Effect.void;
-                          }
-                          return recordSetupScriptStarted({
-                            requestedAt,
-                            worktreePath,
-                            scriptId: setupResult.scriptId,
-                            scriptName: setupResult.scriptName,
-                            terminalId: setupResult.terminalId,
-                          });
-                        },
+            Effect.gen(function* () {
+              if (!bootstrap?.runSetupScript || !targetWorktreePath) {
+                return;
+              }
+              const worktreePath = targetWorktreePath;
+              const requestedAt = yield* nowIso;
+              yield* projectSetupScriptRunner
+                .runForThread({
+                  threadId: command.threadId,
+                  ...(targetProjectId ? { projectId: targetProjectId } : {}),
+                  ...(targetProjectCwd ? { projectCwd: targetProjectCwd } : {}),
+                  worktreePath,
+                })
+                .pipe(
+                  Effect.matchEffect({
+                    onFailure: (error) =>
+                      recordSetupScriptLaunchFailure({
+                        error,
+                        requestedAt,
+                        worktreePath,
                       }),
-                    );
-                })()
-              : Effect.void;
+                    onSuccess: (setupResult) => {
+                      if (setupResult.status !== "started") {
+                        return Effect.void;
+                      }
+                      return recordSetupScriptStarted({
+                        requestedAt,
+                        worktreePath,
+                        scriptId: setupResult.scriptId,
+                        scriptName: setupResult.scriptName,
+                        terminalId: setupResult.terminalId,
+                      });
+                    },
+                  }),
+                );
+            });
 
           const bootstrapProgram = Effect.gen(function* () {
             if (bootstrap?.createThread) {
@@ -592,7 +613,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                         `session-stop-for-archive:${normalizedCommand.commandId}`,
                       ),
                       threadId: normalizedCommand.threadId,
-                      createdAt: new Date().toISOString(),
+                      createdAt: yield* nowIso,
                     });
 
                     yield* dispatchNormalizedCommand(stopCommand);
@@ -618,7 +639,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
               return result;
             }).pipe(
               Effect.mapError((cause) =>
-                Schema.is(OrchestrationDispatchCommandError)(cause)
+                isOrchestrationDispatchCommandError(cause)
                   ? cause
                   : new OrchestrationDispatchCommandError({
                       message: "Failed to dispatch orchestration command",
@@ -785,11 +806,28 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             ).pipe(Effect.map((providers) => ({ providers }))),
             { "rpc.aggregate": "server" },
           ),
+        [WS_METHODS.serverUpdateProvider]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverUpdateProvider,
+            providerMaintenanceRunner.updateProvider(input),
+            {
+              "rpc.aggregate": "server",
+            },
+          ),
         [WS_METHODS.serverUpsertKeybinding]: (rule) =>
           observeRpcEffect(
             WS_METHODS.serverUpsertKeybinding,
             Effect.gen(function* () {
               const keybindingsConfig = yield* keybindings.upsertKeybindingRule(rule);
+              return { keybindings: keybindingsConfig, issues: [] };
+            }),
+            { "rpc.aggregate": "server" },
+          ),
+        [WS_METHODS.serverRemoveKeybinding]: (rule) =>
+          observeRpcEffect(
+            WS_METHODS.serverRemoveKeybinding,
+            Effect.gen(function* () {
+              const keybindingsConfig = yield* keybindings.removeKeybindingRule(rule);
               return { keybindings: keybindingsConfig, issues: [] };
             }),
             { "rpc.aggregate": "server" },
@@ -818,6 +856,25 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
               "rpc.aggregate": "server",
             },
           ),
+        [WS_METHODS.serverGetTraceDiagnostics]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.serverGetTraceDiagnostics,
+            TraceDiagnostics.readTraceDiagnostics({
+              traceFilePath: config.serverTracePath,
+              maxFiles: config.traceMaxFiles,
+            }),
+            {
+              "rpc.aggregate": "server",
+            },
+          ),
+        [WS_METHODS.serverGetProcessDiagnostics]: (_input) =>
+          observeRpcEffect(WS_METHODS.serverGetProcessDiagnostics, processDiagnostics.read, {
+            "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.serverSignalProcess]: (input) =>
+          observeRpcEffect(WS_METHODS.serverSignalProcess, processDiagnostics.signal(input), {
+            "rpc.aggregate": "server",
+          }),
         [WS_METHODS.sourceControlLookupRepository]: (input) =>
           observeRpcEffect(
             WS_METHODS.sourceControlLookupRepository,
@@ -863,7 +920,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             WS_METHODS.projectsWriteFile,
             workspaceFileSystem.writeFile(input).pipe(
               Effect.mapError((cause) => {
-                const message = Schema.is(WorkspacePathOutsideRootError)(cause)
+                const message = isWorkspacePathOutsideRootError(cause)
                   ? "Workspace file path must stay within the project root."
                   : "Failed to write workspace file";
                 return new ProjectWriteFileError({
@@ -1143,15 +1200,12 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         const sessions = yield* SessionCredentialService;
         const session = yield* serverAuth.authenticateWebSocketUpgrade(request);
         const rpcWebSocketHttpEffect = yield* RpcServer.toHttpEffectWebsocket(WsRpcGroup, {
-          spanPrefix: "ws.rpc",
-          spanAttributes: {
-            "rpc.transport": "websocket",
-            "rpc.system": "effect-rpc",
-          },
+          disableTracing: true,
         }).pipe(
           Effect.provide(
             makeWsRpcLayer(session.sessionId).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
+              Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(
                 SourceControlDiscoveryLayer.layer.pipe(
                   Layer.provide(

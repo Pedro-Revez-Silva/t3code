@@ -1,3 +1,4 @@
+// @effect-diagnostics importFromBarrel:off
 import { IsoDateTime, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
 import { Context, Option, Schema } from "effect";
 import type { Effect } from "effect";

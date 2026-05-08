@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics importFromBarrel:off
+// @effect-diagnostics globalDate:off
+// @effect-diagnostics globalDateInEffect:off
 import { appendFileSync, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";

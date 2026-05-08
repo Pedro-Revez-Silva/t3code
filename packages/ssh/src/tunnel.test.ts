@@ -1,8 +1,14 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { NetService } from "@t3tools/shared/Net";
-import { Duration, Effect, Fiber, Layer, Result, Sink, Stream } from "effect";
-import { TestClock } from "effect/testing";
+import * as NetService from "@t3tools/shared/Net";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Result from "effect/Result";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
@@ -68,7 +74,7 @@ const testHttpClient = HttpClient.make((request) =>
 
 const hangingHttpClient = HttpClient.make(() => Effect.never);
 
-const testNetService = NetService.of({
+const testNetService = NetService.NetService.of({
   canListenOnHost: () => Effect.succeed(true),
   isPortAvailableOnLoopback: () => Effect.succeed(true),
   reserveLoopbackPort: () => Effect.succeed(41_773),
@@ -264,7 +270,7 @@ describe("ssh tunnel scripts", () => {
       NodeServices.layer,
       Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
       Layer.succeed(HttpClient.HttpClient, testHttpClient),
-      Layer.succeed(NetService, testNetService),
+      Layer.succeed(NetService.NetService, testNetService),
       SshPasswordPrompt.disabledLayer,
       SshEnvironmentManager.layer(),
     );

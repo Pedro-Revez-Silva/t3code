@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics importFromBarrel:off
+// @effect-diagnostics globalDate:off
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

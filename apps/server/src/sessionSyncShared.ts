@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics importFromBarrel:off
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 
