@@ -475,6 +475,7 @@ describe("codexDesktopSessionSync", () => {
           updatedAt: "2026-04-07T18:00:16.000Z",
         }),
       getShellSnapshot: () => Effect.die("not implemented"),
+      getArchivedShellSnapshot: () => Effect.die("not implemented"),
       getSnapshotSequence: () => Effect.die("not implemented"),
       getCounts: () => Effect.die("not implemented"),
       getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),

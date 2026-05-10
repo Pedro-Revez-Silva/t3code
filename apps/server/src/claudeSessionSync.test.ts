@@ -319,6 +319,7 @@ describe("claudeSessionSync", () => {
           threads: [],
           updatedAt: "2026-04-21T00:00:00.000Z",
         }),
+      getArchivedShellSnapshot: () => Effect.die("not implemented"),
       getSnapshotSequence: () => Effect.die("not implemented"),
       getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
       getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
@@ -529,6 +530,7 @@ describe("claudeSessionSync", () => {
           ],
           updatedAt: "2026-04-21T10:05:00.000Z",
         }),
+      getArchivedShellSnapshot: () => Effect.die("not implemented"),
       getSnapshotSequence: () => Effect.die("not implemented"),
       getCounts: () => Effect.succeed({ projectCount: 1, threadCount: 1 }),
       getActiveProjectByWorkspaceRoot: () =>
