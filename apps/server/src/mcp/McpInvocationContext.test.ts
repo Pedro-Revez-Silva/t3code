@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   PreviewAutomationUnavailableError,
   ProviderInstanceId,
+  ProviderSessionId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -14,6 +15,7 @@ it.effect("reports the scoped credential context when preview capability is unav
     environmentId: EnvironmentId.make("environment-1"),
     threadId: ThreadId.make("thread-1"),
     providerSessionId: "provider-session-1",
+    runtimeProviderSessionId: ProviderSessionId.make("runtime-provider-session-1"),
     providerInstanceId: ProviderInstanceId.make("codex"),
     capabilities: new Set(),
     issuedAt: 1,

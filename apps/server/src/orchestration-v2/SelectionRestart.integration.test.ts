@@ -16,10 +16,13 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import { OrchestratorV2 } from "./Orchestrator.ts";
 import {
@@ -641,4 +644,105 @@ it.live("detaches the old provider session after an active provider handoff", ()
       assert.equal(yield* Ref.get(targetStartCount), 1);
     }),
   ),
+);
+
+it.live("relaunches a prepared run with the current quarantine generation", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const cwd = yield* checkpointWorkspace("quarantine-generation-relaunch");
+      const threadId = ThreadId.make("thread:quarantine-generation-relaunch");
+      const state = yield* Ref.make<RestartAdapterState>({
+        activeTurn: null,
+        opened: [],
+        started: [],
+        closedSessionCount: 0,
+        failedReplacementOpen: false,
+      });
+      const registry = makeSingleProviderAdapterRegistryLayer(makeRestartAdapter(state));
+      const databaseLayer = Layer.succeed(SqlClient.SqlClient, sql);
+      const makeRuntime = () =>
+        makeOrchestratorV2ReplayLayerWithRegistry(
+          { name: "quarantine-generation-relaunch" },
+          registry,
+          { databaseLayer, runEffectWorker: false },
+        );
+
+      const initial = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const orchestrator = yield* OrchestratorV2;
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:quarantine-generation-relaunch:create"),
+            threadId,
+            projectId: ProjectId.make("project:quarantine-generation-relaunch"),
+            title: "Quarantine generation relaunch",
+            modelSelection: initialSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:quarantine-generation-relaunch:prepare"),
+            threadId,
+            messageId: MessageId.make("message:quarantine-generation-relaunch"),
+            text: "resume safely",
+            attachments: [],
+            modelSelection: initialSelection,
+            dispatchMode: { type: "defer_start" },
+          });
+          const projection = yield* orchestrator.getThreadProjection(threadId);
+          const run = projection.runs[0];
+          const providerThread = projection.providerThreads[0];
+          if (run === undefined || providerThread?.providerSessionId == null) {
+            return yield* Effect.die("prepared run did not persist provider ownership");
+          }
+          return { runId: run.id, staleProviderSessionId: providerThread.providerSessionId };
+        }).pipe(Effect.provide(makeRuntime())),
+      );
+
+      yield* sql`
+        INSERT INTO orchestration_v2_provider_session_generations(
+          thread_id,
+          provider_instance_id,
+          generation,
+          quarantined_provider_session_id,
+          quarantined_at,
+          reason
+        ) VALUES (
+          ${threadId},
+          ${providerInstanceId},
+          1,
+          ${initial.staleProviderSessionId},
+          '2026-07-29T00:00:00.000Z',
+          'simulated process loss between legacy quarantine writes'
+        )
+      `;
+
+      const relaunchedProviderSessionId = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const orchestrator = yield* OrchestratorV2;
+          yield* orchestrator.dispatch({
+            type: "prepared-run.release",
+            commandId: CommandId.make("command:quarantine-generation-relaunch:release"),
+            threadId,
+            runId: initial.runId,
+          });
+          const projection = yield* orchestrator.getThreadProjection(threadId);
+          return projection.providerThreads[0]?.providerSessionId;
+        }).pipe(Effect.provide(makeRuntime())),
+      );
+
+      assert.isNotNull(relaunchedProviderSessionId);
+      assert.notEqual(relaunchedProviderSessionId, initial.staleProviderSessionId);
+      assert.include(relaunchedProviderSessionId!, "generation:1");
+      assert.deepEqual((yield* Ref.get(state)).opened, []);
+    }),
+  ).pipe(Effect.provide(SqlitePersistenceMemory)),
 );

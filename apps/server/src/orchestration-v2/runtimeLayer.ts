@@ -29,6 +29,8 @@ import { layer as providerContinuationRequestsLayer } from "./ProviderContinuati
 import { workerLive as providerContinuationWorkerLive } from "./ProviderContinuationService.ts";
 import { layer as providerEventIngestorLayer } from "./ProviderEventIngestor.ts";
 import { layer as providerSessionManagerLayer } from "./ProviderSessionManager.ts";
+import { layer as providerSessionGenerationStoreLayer } from "./ProviderSessionGenerationStore.ts";
+import { layer as providerOwnershipGuardLayer } from "./ProviderOwnershipGuard.ts";
 import { layer as providerRuntimeRecoveryLayer } from "./ProviderRuntimeRecoveryService.ts";
 import { layer as providerSwitchServiceLayer } from "./ProviderSwitchService.ts";
 import { layer as providerTurnControlServiceLayer } from "./ProviderTurnControlService.ts";
@@ -43,6 +45,10 @@ import { layer as threadLifecycleServiceLayer } from "./ThreadLifecycleService.t
 import { layer as threadForkServiceLayer } from "./ThreadForkService.ts";
 import { layer as turnItemPositionStoreLayer } from "./TurnItemPositionStore.ts";
 import { layer as scheduledTaskServiceLayer } from "../scheduledTasks/ScheduledTaskService.ts";
+import { layer as supervisorWakeServiceLayer } from "./SupervisorWakeService.ts";
+import { layer as supervisorControlPlaneLayer } from "../supervisor/SupervisorControlPlaneService.ts";
+import { layer as supervisorDesignationLayer } from "../supervisor/SupervisorDesignationService.ts";
+import { layer as supervisorGoalCancellationLayer } from "../supervisor/SupervisorGoalCancellationService.ts";
 
 export const ProjectServiceLayerLive = projectServiceLayer.pipe(
   Layer.provide(Layer.merge(ProjectionProjectRepositoryLive, OrchestrationLayerLive)),
@@ -72,9 +78,15 @@ const projectionMaintenanceProvided = projectionMaintenanceLayer.pipe(Layer.prov
 const legacyV1ThreadImporterProvided = legacyV1ThreadImporterLayer.pipe(
   Layer.provide(Layer.mergeAll(eventSinkProvided, eventStoreProvided)),
 );
+const providerSessionGenerationStoreProvided = providerSessionGenerationStoreLayer.pipe(
+  Layer.provide(OrchestrationEventInfrastructureLayerLive),
+);
+const providerOwnershipGuardProvided = providerOwnershipGuardLayer;
 
 const providerEventIngestorProvided = providerEventIngestorLayer.pipe(
-  Layer.provide(Layer.mergeAll(eventSinkProvided, idAllocatorLayer)),
+  Layer.provide(
+    Layer.mergeAll(eventSinkProvided, idAllocatorLayer, providerSessionGenerationStoreProvided),
+  ),
 );
 
 const checkpointServiceProvided = checkpointServiceLayer.pipe(Layer.provide(idAllocatorLayer));
@@ -94,6 +106,8 @@ const providerSessionManagerProvided = providerSessionManagerLayer.pipe(
       eventSinkProvided,
       idAllocatorLayer,
       projectionStoreLayer,
+      providerOwnershipGuardProvided,
+      providerSessionGenerationStoreProvided,
     ),
   ),
 );
@@ -117,6 +131,7 @@ const providerTurnStartServiceProvided = providerTurnStartServiceLayer.pipe(
       idAllocatorLayer,
       projectionStoreLayer,
       providerSessionManagerProvided,
+      providerSessionGenerationStoreProvided,
       runExecutionServiceProvided,
       runtimePolicyProvided,
     ),
@@ -127,7 +142,14 @@ const providerTurnControlServiceProvided = providerTurnControlServiceLayer.pipe(
   Layer.provide(Layer.merge(projectionStoreLayer, providerSessionManagerProvided)),
 );
 const runtimeRequestServiceProvided = runtimeRequestServiceLayer.pipe(
-  Layer.provide(Layer.merge(projectionStoreLayer, providerSessionManagerProvided)),
+  Layer.provide(
+    Layer.mergeAll(
+      eventSinkProvided,
+      idAllocatorLayer,
+      projectionStoreLayer,
+      providerSessionManagerProvided,
+    ),
+  ),
 );
 const checkpointRollbackServiceProvided = checkpointRollbackServiceLayer.pipe(
   Layer.provide(
@@ -136,7 +158,9 @@ const checkpointRollbackServiceProvided = checkpointRollbackServiceLayer.pipe(
       eventSinkProvided,
       idAllocatorLayer,
       projectionStoreLayer,
+      providerOwnershipGuardProvided,
       providerSessionManagerProvided,
+      providerSessionGenerationStoreProvided,
       runtimePolicyProvided,
     ),
   ),
@@ -148,6 +172,7 @@ const checkpointCaptureServiceProvided = checkpointCaptureServiceLayer.pipe(
       eventSinkProvided,
       idAllocatorLayer,
       projectionStoreLayer,
+      providerSessionManagerProvided,
     ),
   ),
 );
@@ -170,18 +195,6 @@ const effectExecutorProvided = effectExecutorLayer.pipe(
 const effectWorkerProvided = effectWorkerLayer.pipe(
   Layer.provide(Layer.merge(storesLayer, effectExecutorProvided)),
 );
-const providerRuntimeRecoveryProvided = providerRuntimeRecoveryLayer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      effectWorkerProvided,
-      storesLayer,
-      eventSinkProvided,
-      idAllocatorLayer,
-      projectionStoreLayer,
-    ),
-  ),
-);
-
 const orchestratorProvided = orchestratorLayer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -197,9 +210,24 @@ const orchestratorProvided = orchestratorLayer.pipe(
       providerEventIngestorProvided,
       runtimePolicyProvided,
       providerSessionManagerProvided,
+      providerSessionGenerationStoreProvided,
       providerSwitchServiceProvided,
       runExecutionServiceProvided,
       threadForkServiceLayer,
+    ),
+  ),
+);
+const providerRuntimeRecoveryProvided = providerRuntimeRecoveryLayer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      orchestratorProvided,
+      effectWorkerProvided,
+      storesLayer,
+      eventSinkProvided,
+      idAllocatorLayer,
+      projectionStoreLayer,
+      providerSessionManagerProvided,
+      providerTurnControlServiceProvided,
     ),
   ),
 );
@@ -232,6 +260,22 @@ const providerContinuationWorkerProvided = providerContinuationWorkerLive.pipe(
     Layer.mergeAll(providerContinuationRequestsLayer, threadManagementProvided, idAllocatorLayer),
   ),
 );
+const supervisorWakeProvided = supervisorWakeServiceLayer.pipe(
+  Layer.provide(Layer.merge(threadManagementProvided, supervisorControlPlaneLayer)),
+);
+const supervisorGoalCancellationProvided = supervisorGoalCancellationLayer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      storesLayer,
+      providerRuntimeRecoveryProvided,
+      threadManagementProvided,
+      supervisorControlPlaneLayer,
+    ),
+  ),
+);
+const supervisorDesignationProvided = supervisorDesignationLayer.pipe(
+  Layer.provide(supervisorControlPlaneLayer),
+);
 
 export const OrchestrationV2LayerLive = Layer.mergeAll(
   orchestratorProvided,
@@ -241,6 +285,8 @@ export const OrchestrationV2LayerLive = Layer.mergeAll(
   providerRuntimeRecoveryProvided,
   projectionMaintenanceProvided,
   legacyV1ThreadImporterProvided,
+  supervisorWakeProvided,
+  supervisorGoalCancellationProvided,
 );
 
 export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(
@@ -250,5 +296,8 @@ export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(
   threadLaunchProvided,
   threadLifecycleProvided,
   scheduledTaskProvided,
+  supervisorControlPlaneLayer,
+  supervisorGoalCancellationProvided,
+  supervisorDesignationProvided,
   providerContinuationWorkerProvided,
 );

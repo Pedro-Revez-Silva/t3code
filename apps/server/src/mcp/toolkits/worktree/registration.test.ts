@@ -1,19 +1,24 @@
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { ProviderInstanceId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { HttpBody, HttpClient, HttpRouter } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
+import * as ServerConfig from "../../../config.ts";
 import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import { ThreadManagementService } from "../../../orchestration-v2/ThreadManagementService.ts";
+import { ThreadLaunchService } from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../../../project/ProjectSetupScriptRunner.ts";
 import { ProviderRegistry } from "../../../provider/Services/ProviderRegistry.ts";
 import { ScheduledTaskService } from "../../../scheduledTasks/ScheduledTaskService.ts";
+import { SupervisorControlPlaneService } from "../../../supervisor/SupervisorControlPlaneService.ts";
+import { SupervisorGoalCancellationService } from "../../../supervisor/SupervisorGoalCancellationService.ts";
+import { RuntimeMutationAuthorityGuard } from "../../../supervisor/SupervisorAuthority.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../../vcs/VcsStatusBroadcaster.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";
@@ -22,8 +27,12 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 
 const StubServicesLive = Layer.mergeAll(
   Layer.mock(ThreadManagementService)({}),
+  Layer.mock(ThreadLaunchService)({}),
   Layer.mock(ProviderRegistry)({}),
   Layer.mock(ScheduledTaskService)({}),
+  Layer.mock(SupervisorControlPlaneService)({}),
+  Layer.mock(SupervisorGoalCancellationService)({}),
+  Layer.mock(RuntimeMutationAuthorityGuard)({ require: () => Effect.void }),
   Layer.mock(ProjectService.ProjectService)({}),
   ServerSettings.layerTest({}),
   Layer.mock(GitWorkflowService.GitWorkflowService)({}),
@@ -45,12 +54,14 @@ it.effect("production mcp layer lists worktree tools over http", () =>
           }),
         ),
         Layer.provide(PreviewAutomationBroker.layer),
+        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-registration-" })),
         Layer.provide(StubServicesLive),
         Layer.build,
       );
 
       const registry = McpSessionRegistry.issueActiveMcpCredential({
         threadId: ThreadId.make("thread-scratch"),
+        runtimeProviderSessionId: ProviderSessionId.make("runtime-session-scratch"),
         providerInstanceId: ProviderInstanceId.make("claudeAgent"),
       });
       const credential = yield* registry;

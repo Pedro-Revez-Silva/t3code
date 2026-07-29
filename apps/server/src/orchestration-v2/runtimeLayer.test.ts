@@ -91,7 +91,7 @@ const TestProviderInstanceRegistry = Layer.succeed(ProviderInstanceRegistry, {
 
 const TestLayer = OrchestrationV2LayerLive.pipe(
   Layer.provide(mcpSessionRegistryTestLayer),
-  Layer.provide(SqlitePersistenceMemory),
+  Layer.provideMerge(SqlitePersistenceMemory),
   Layer.provide(CheckpointStoreTestLayer),
   Layer.provide(ServerConfigLayer),
   Layer.provide(ServerSettingsService.layerTest()),
@@ -316,7 +316,19 @@ it.layer(TestLayer)("OrchestrationV2LayerLive", (it) => {
   it.effect("rejects settling a thread while a run is active", () =>
     Effect.gen(function* () {
       const orchestrator = yield* OrchestratorV2;
+      const sql = yield* SqlClient.SqlClient;
       const threadId = ThreadId.make("runtime-layer-active-settle-thread");
+      const projectId = ProjectId.make("runtime-layer-active-settle-project");
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json, scripts_json,
+          created_at, updated_at, deleted_at
+        ) VALUES (
+          ${projectId}, 'Active settle project', '/tmp/runtime-layer-active-settle', NULL, '[]',
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL
+        )
+      `;
 
       yield* orchestrator.dispatch({
         type: "thread.create",
@@ -324,7 +336,7 @@ it.layer(TestLayer)("OrchestrationV2LayerLive", (it) => {
         creationSource: "web",
         commandId: CommandId.make("runtime-layer-active-settle-create"),
         threadId,
-        projectId: ProjectId.make("runtime-layer-active-settle-project"),
+        projectId,
         title: "Active settle",
         modelSelection,
         runtimeMode: "full-access",

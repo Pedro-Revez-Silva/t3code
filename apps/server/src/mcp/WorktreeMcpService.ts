@@ -22,6 +22,7 @@ import { ThreadManagementService } from "../orchestration-v2/ThreadManagementSer
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { RuntimeMutationAuthorityGuard } from "../supervisor/SupervisorAuthority.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
@@ -64,6 +65,7 @@ const make = Effect.gen(function* () {
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const setupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+  const runtimeAuthorityGuard = yield* RuntimeMutationAuthorityGuard;
 
   // Serializes handoffs per thread: two concurrent calls could otherwise both
   // pass the worktreePath === null check and each create a worktree, leaving
@@ -133,6 +135,22 @@ const make = Effect.gen(function* () {
     scope: McpInvocationScope,
     input: WorktreeMcpHandoffInput,
   ) {
+    const authority = {
+      threadId: scope.threadId,
+      runtimeProviderSessionId: scope.runtimeProviderSessionId,
+      providerInstanceId: scope.providerInstanceId,
+      runtimeGeneration: scope.runtimeGeneration ?? 0,
+    } as const;
+    const requireCurrentRuntime = Effect.suspend(() =>
+      runtimeAuthorityGuard.require(authority),
+    ).pipe(
+      Effect.mapError((error) =>
+        failure(
+          "capability_denied",
+          `This MCP runtime no longer owns the thread: ${error.message}`,
+        ),
+      ),
+    );
     const alreadyInWorktree = (worktreePath: string) =>
       failure(
         "already_in_worktree",
@@ -219,6 +237,7 @@ const make = Effect.gen(function* () {
 
     let worktreeBaseRef = baseRef;
     if (startFromOrigin) {
+      yield* requireCurrentRuntime;
       yield* gitWorkflow
         .fetchRemote({ cwd: projectCwd, remoteName: "origin" })
         .pipe(asOperationFailed("Unable to fetch origin"));
@@ -232,6 +251,7 @@ const make = Effect.gen(function* () {
       worktreeBaseRef = resolvedRemoteBase.commitSha;
     }
 
+    yield* requireCurrentRuntime;
     const ids = yield* handoffIds(scope);
 
     // uninterruptibleMask: only the potentially slow worktree creation itself
@@ -269,10 +289,14 @@ const make = Effect.gen(function* () {
             }).pipe(Effect.as({ status: "failed", detail } as const));
           });
 
-        // suspend: build the removal call only if cleanup actually runs.
-        const removeCreatedWorktree = Effect.suspend(() =>
-          gitWorkflow.removeWorktree({ cwd: projectCwd, path: worktreePath, force: true }),
-        ).pipe(Effect.ignoreCause({ log: true }));
+        const removeCreatedResources = Effect.gen(function* () {
+          yield* gitWorkflow
+            .removeWorktree({ cwd: projectCwd, path: worktreePath, force: true })
+            .pipe(Effect.ignoreCause({ log: true }));
+          yield* gitWorkflow
+            .deleteLocalBranch({ cwd: projectCwd, branch: worktree.worktree.refName })
+            .pipe(Effect.ignoreCause({ log: true }));
+        });
 
         const recheckAndBind = Effect.gen(function* () {
           // The projection was read before the potentially slow git work
@@ -293,13 +317,18 @@ const make = Effect.gen(function* () {
             );
           }
           yield* threadManagement
-            .dispatch({
-              type: "thread.metadata.update",
-              commandId: ids.commandId,
-              threadId: scope.threadId,
-              branch: worktree.worktree.refName,
-              worktreePath,
-            })
+            .dispatch(
+              {
+                type: "thread.metadata.update",
+                commandId: ids.commandId,
+                threadId: scope.threadId,
+                branch: worktree.worktree.refName,
+                worktreePath,
+              },
+              {
+                runtimeAuthority: authority,
+              },
+            )
             .pipe(
               Effect.catchCause((cause) =>
                 // Interrupt-only causes propagate unchanged: whether the
@@ -324,7 +353,7 @@ const make = Effect.gen(function* () {
           // the removal: the binding may have committed, and force-deleting a
           // worktree the thread now points at would be worse than leaking one.
           Effect.onError((cause) =>
-            Cause.hasInterruptsOnly(cause) ? Effect.void : removeCreatedWorktree,
+            Cause.hasInterruptsOnly(cause) ? Effect.void : removeCreatedResources,
           ),
         );
 
@@ -351,6 +380,9 @@ const make = Effect.gen(function* () {
                     mode: "queue",
                     createdBy: "agent",
                     creationSource: "mcp",
+                    dispatchOptions: {
+                      runtimeAuthority: authority,
+                    },
                   })
                   .pipe(
                     Effect.map(
@@ -477,5 +509,6 @@ export const layer: Layer.Layer<
   | ServerSettings.ServerSettingsService
   | GitWorkflowService.GitWorkflowService
   | ProjectSetupScriptRunner.ProjectSetupScriptRunner
+  | RuntimeMutationAuthorityGuard
   | VcsStatusBroadcaster.VcsStatusBroadcaster
 > = Layer.effect(WorktreeMcpService, make);

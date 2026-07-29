@@ -13,7 +13,7 @@ layer("035_036_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 43 }, (_, index) => index + 1),
+        Array.from({ length: 48 }, (_, index) => index + 1),
       );
     }),
   );
@@ -162,5 +162,224 @@ it.effect("upgrades a database already at released main migration 034", () =>
       WHERE type = 'table' AND name = 'orchestration_v2_legacy_imports'
     `;
     assert.strictEqual(legacyImportTables.length, 1);
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+);
+
+it.effect("installs durable provider authority and rollback reservation tables", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 48 });
+    const tables = yield* sql<{ readonly name: string }>`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table'
+        AND name IN (
+          'orchestration_v2_provider_authority_acquisitions',
+          'orchestration_v2_provider_mutation_owner',
+          'orchestration_v2_provider_resume_authorizations',
+          'orchestration_v2_provider_resume_intents',
+          'orchestration_v2_provider_rollback_reservations'
+        )
+      ORDER BY name
+    `;
+    assert.deepStrictEqual(
+      tables.map(({ name }) => name),
+      [
+        "orchestration_v2_provider_authority_acquisitions",
+        "orchestration_v2_provider_mutation_owner",
+        "orchestration_v2_provider_resume_authorizations",
+        "orchestration_v2_provider_resume_intents",
+        "orchestration_v2_provider_rollback_reservations",
+      ],
+    );
+    const resumeIntentColumns = yield* sql<{ readonly name: string }>`
+      SELECT name
+      FROM pragma_table_info('orchestration_v2_provider_resume_intents')
+      WHERE name IN ('native_turn_id_barrier', 'confirmed_native_turn_id')
+      ORDER BY name
+    `;
+    assert.deepStrictEqual(
+      resumeIntentColumns.map(({ name }) => name),
+      ["confirmed_native_turn_id", "native_turn_id_barrier"],
+    );
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+);
+
+it.effect("upgrades legacy rollback reservations as conservatively abandoned", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 47 });
+    yield* sql`
+      INSERT INTO orchestration_v2_provider_rollback_reservations (
+        reservation_id,
+        thread_id,
+        provider_instance_id,
+        run_id,
+        attempt_id,
+        provider_thread_id,
+        provider_session_id,
+        generation,
+        created_at
+      ) VALUES (
+        'reservation:legacy-recovery',
+        'thread:legacy-recovery',
+        'codex',
+        'run:legacy-recovery',
+        'attempt:legacy-recovery',
+        'provider-thread:legacy-recovery',
+        'provider-session:legacy-recovery',
+        0,
+        '2026-01-01T00:00:00.000Z'
+      )
+    `;
+    yield* runMigrations({ toMigrationInclusive: 48 });
+    const rows = yield* sql<{
+      readonly owner_instance_id: string;
+      readonly phase: string;
+      readonly target_run_ordinal: number | null;
+      readonly target_resolution: string;
+      readonly updated_at: string;
+    }>`
+      SELECT owner_instance_id, phase, target_run_ordinal, target_resolution, updated_at
+      FROM orchestration_v2_provider_rollback_reservations
+      WHERE reservation_id = 'reservation:legacy-recovery'
+    `;
+    assert.deepStrictEqual(rows, [
+      {
+        owner_instance_id: "legacy-abandoned",
+        phase: "filesystem_started",
+        target_run_ordinal: null,
+        target_resolution: "ambiguous",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+);
+
+it.effect("recovers the exact target when a legacy rollback skips multiple runs", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 47 });
+    for (const ordinal of [3, 4, 5]) {
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_runs (
+          run_id,
+          thread_id,
+          ordinal,
+          provider,
+          provider_instance_id,
+          provider_thread_id,
+          status,
+          requested_at,
+          completed_at,
+          payload_json
+        ) VALUES (
+          ${`run:legacy-current-${ordinal}`},
+          'thread:legacy-skip-many',
+          ${ordinal},
+          'codex',
+          'codex',
+          'provider-thread:legacy-skip-many',
+          'completed',
+          '2026-01-01T00:00:00.000Z',
+          '2026-01-01T00:00:00.000Z',
+          '{}'
+        )
+      `;
+    }
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_checkpoints (
+        checkpoint_id,
+        thread_id,
+        scope_id,
+        run_id,
+        node_id,
+        parent_checkpoint_id,
+        ordinal_within_scope,
+        app_run_ordinal,
+        status,
+        captured_at,
+        payload_json
+      ) VALUES (
+        'checkpoint:legacy-skip-many',
+        'thread:legacy-skip-many',
+        'scope:legacy-skip-many',
+        'run:legacy-target-2',
+        'node:legacy-target-2',
+        NULL,
+        2,
+        2,
+        'ready',
+        '2026-01-01T00:00:00.000Z',
+        '{}'
+      )
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_effect_outbox (
+        effect_id,
+        command_id,
+        thread_id,
+        effect_type,
+        payload_json,
+        status,
+        attempt_count,
+        available_at,
+        created_at,
+        updated_at
+      ) VALUES (
+        'effect:legacy-skip-many',
+        'command:legacy-skip-many',
+        'thread:legacy-skip-many',
+        'provider-thread.rollback',
+        '{"type":"provider-thread.rollback","providerThreadId":"provider-thread:legacy-skip-many","checkpointId":"checkpoint:legacy-skip-many","scopeId":"scope:legacy-skip-many"}',
+        'running',
+        1,
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:01.000Z'
+      )
+    `;
+    yield* sql`
+      INSERT INTO orchestration_v2_provider_rollback_reservations (
+        reservation_id,
+        thread_id,
+        provider_instance_id,
+        run_id,
+        attempt_id,
+        provider_thread_id,
+        provider_session_id,
+        generation,
+        created_at
+      ) VALUES (
+        'reservation:legacy-skip-many',
+        'thread:legacy-skip-many',
+        'codex',
+        'run:legacy-current-5',
+        'attempt:legacy-current-5',
+        'provider-thread:legacy-skip-many',
+        'provider-session:legacy-skip-many',
+        0,
+        '2026-01-01T00:00:02.000Z'
+      )
+    `;
+    yield* runMigrations({ toMigrationInclusive: 48 });
+    const rows = yield* sql<{
+      readonly checkpoint_id: string;
+      readonly scope_id: string;
+      readonly target_run_ordinal: number | null;
+      readonly target_resolution: string;
+    }>`
+      SELECT checkpoint_id, scope_id, target_run_ordinal, target_resolution
+      FROM orchestration_v2_provider_rollback_reservations
+      WHERE reservation_id = 'reservation:legacy-skip-many'
+    `;
+    assert.deepStrictEqual(rows, [
+      {
+        checkpoint_id: "checkpoint:legacy-skip-many",
+        scope_id: "scope:legacy-skip-many",
+        target_run_ordinal: 2,
+        target_resolution: "exact",
+      },
+    ]);
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );

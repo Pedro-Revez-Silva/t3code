@@ -1136,7 +1136,10 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
               firstRunOrdinal: null,
               lastRunOrdinal: null,
               handoffIds: [],
-              forkedFrom: null,
+              forkedFrom: {
+                providerThreadId: turn.providerTurn.providerThreadId,
+                providerTurnId: turn.providerTurnId,
+              },
               createdAt: now,
               updatedAt: now,
             };

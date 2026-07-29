@@ -38,6 +38,7 @@ import { EventSinkV2 } from "./EventSink.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "./IdAllocator.ts";
 import type { ProviderAdapterV2Event, ProviderAdapterV2SessionRuntime } from "./ProviderAdapter.ts";
 import { ProviderEventIngestorV2 } from "./ProviderEventIngestor.ts";
+import { canSeedRelatedSubagent } from "./ProviderTurnStartService.ts";
 import {
   canRouteRelatedSubagent,
   cascadeTerminalizeRunOwnedSubagents,
@@ -231,6 +232,157 @@ it("does not carry interrupted child ownership into later attempts", () => {
   } satisfies ProviderAdapterV2Event;
 
   assert.isFalse(routeProviderEvent(lateChildNode, identity, state)[0]);
+});
+
+it("enrolls a resumed child thread from its current provider turn without thread recreation", () => {
+  const identity: ProviderEventRouteIdentity = {
+    threadId: ThreadId.make("thread:resumed-child-routing:root"),
+    runId: RunId.make("run:resumed-child-routing"),
+    attemptId: RunAttemptId.make("attempt:resumed-child-routing"),
+    providerThreadId: ProviderThreadId.make("provider-thread:resumed-child-routing:root"),
+  };
+  const childThreadId = ThreadId.make("thread:resumed-child-routing:child");
+  const childProviderThreadId = ProviderThreadId.make(
+    "provider-thread:resumed-child-routing:child",
+  );
+  const rootProviderTurnId = ProviderTurnId.make("provider-turn:resumed-child-routing:root");
+  const childProviderTurnId = ProviderTurnId.make("provider-turn:resumed-child-routing:child");
+  const initial = makeProviderEventRoutingState({
+    identity,
+    providerTurnId: rootProviderTurnId,
+  });
+  const childTurn = {
+    type: "provider_turn.updated",
+    driver,
+    threadId: childThreadId,
+    providerTurn: {
+      id: childProviderTurnId,
+      providerThreadId: childProviderThreadId,
+      nodeId: NodeId.make("node:resumed-child-routing:child"),
+      runAttemptId: null,
+      nativeTurnRef: null,
+      ordinal: 2,
+      status: "running",
+      startedAt: null,
+      completedAt: null,
+    },
+  } satisfies ProviderAdapterV2Event;
+  assert.isFalse(routeProviderEvent(childTurn, identity, initial)[0]);
+  const request = {
+    type: "provider_thread.resume_requested",
+    driver,
+    parentProviderThreadId: identity.providerThreadId,
+    parentProviderTurnId: rootProviderTurnId,
+    childProviderThreadId,
+    childThreadId,
+    nativeItemId: "resume-item:resumed-child-routing",
+    nativeTurnIdBarrier: "019a0000-0002-7000-8000-000000000001",
+  } satisfies ProviderAdapterV2Event;
+  const [requestAccepted, afterRequest] = routeProviderEvent(request, identity, initial);
+  assert.isTrue(requestAccepted);
+  assert.isFalse(afterRequest.ownedThreadIds.has(childThreadId));
+  const confirmation = {
+    type: "provider_thread.resume_confirmed",
+    driver,
+    parentProviderThreadId: identity.providerThreadId,
+    parentProviderTurnId: rootProviderTurnId,
+    childProviderThreadId,
+    childThreadId,
+    nativeItemId: "resume-item:resumed-child-routing",
+    nativeTurnIdBarrier: "019a0000-0002-7000-8000-000000000001",
+    nativeChildTurnId: "019a0000-0003-7000-8000-000000000001",
+  } satisfies ProviderAdapterV2Event;
+  const [confirmationAccepted, afterConfirmation] = routeProviderEvent(
+    confirmation,
+    identity,
+    afterRequest,
+  );
+  assert.isTrue(confirmationAccepted);
+  const [turnAccepted, afterTurn] = routeProviderEvent(childTurn, identity, afterConfirmation);
+  assert.isTrue(turnAccepted);
+  assert.isTrue(afterTurn.ownedThreadIds.has(childThreadId));
+
+  const childItem = {
+    type: "turn_item.updated",
+    driver,
+    turnItem: {
+      id: TurnItemId.make("turn-item:resumed-child-routing"),
+      threadId: childThreadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed",
+      title: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: DateTime.makeUnsafe("2026-07-29T00:00:00.000Z"),
+      type: "assistant_message",
+      messageId: MessageId.make("message:resumed-child-routing"),
+      text: "continued",
+      streaming: false,
+    },
+  } satisfies ProviderAdapterV2Event;
+  assert.isTrue(routeProviderEvent(childItem, identity, afterTurn)[0]);
+});
+
+it("seeds only current-attempt provider-owned children when restarting a run", () => {
+  const currentRunId = RunId.make("run:related-child:current");
+  const providerOwnedNodeId = NodeId.make("node:related-child:provider-owned");
+  const appOwnedNodeId = NodeId.make("node:related-child:app-owned");
+  const resumedProviderNodeId = NodeId.make("node:related-child:resumed-provider-owned");
+  const currentAttemptNodeIds = new Set([providerOwnedNodeId, appOwnedNodeId]);
+  assert.isTrue(
+    canSeedRelatedSubagent(
+      {
+        id: providerOwnedNodeId,
+        origin: "provider_native",
+        runId: currentRunId,
+        status: "running",
+      },
+      currentRunId,
+      currentAttemptNodeIds,
+    ),
+  );
+  assert.isFalse(
+    canSeedRelatedSubagent(
+      {
+        id: appOwnedNodeId,
+        origin: "app_owned",
+        runId: currentRunId,
+        status: "running",
+      },
+      currentRunId,
+      currentAttemptNodeIds,
+    ),
+  );
+  assert.isFalse(
+    canSeedRelatedSubagent(
+      {
+        id: resumedProviderNodeId,
+        origin: "provider_native",
+        runId: RunId.make("run:related-child:prior"),
+        status: "completed",
+      },
+      currentRunId,
+      currentAttemptNodeIds,
+    ),
+  );
+  assert.isFalse(
+    canSeedRelatedSubagent(
+      {
+        id: NodeId.make("node:related-child:prior-attempt"),
+        origin: "provider_native",
+        runId: currentRunId,
+        status: "completed",
+      },
+      currentRunId,
+      currentAttemptNodeIds,
+    ),
+  );
 });
 
 it.effect("rechecks run ownership immediately before calling the provider", () =>

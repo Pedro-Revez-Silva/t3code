@@ -152,6 +152,25 @@ import {
   ScheduledTaskMutationResult,
 } from "./scheduledTask.ts";
 import {
+  ProjectExecutionProfileListInput,
+  ProjectExecutionProfileListResult,
+  ProjectExecutionProfileUpdateInput,
+  ProjectExecutionProfileUpdateResult,
+  SupervisorConfigurationReadInput,
+  SupervisorConfigurationReadResult,
+  SupervisorConfigurationUpdateInput,
+  SupervisorConfigurationUpdateResult,
+  SupervisorControlPlaneRpcError,
+  SupervisorGoalCancelInput,
+  SupervisorGoalCancelResult,
+  SupervisorGoalListInput,
+  SupervisorGoalListResult,
+  SupervisorGoalReadInput,
+  SupervisorGoalReadResult,
+  SupervisorGoalUpdateInput,
+  SupervisorGoalUpdateResult,
+} from "./supervisorControlPlane.ts";
+import {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
   SourceControlDiscoveryResult,
@@ -245,6 +264,18 @@ export const WS_METHODS = {
   scheduledTasksSetEnabled: "scheduledTasks.setEnabled",
   scheduledTasksDelete: "scheduledTasks.delete",
   scheduledTasksRunNow: "scheduledTasks.runNow",
+
+  supervisorConfigRead: "supervisor.config.read",
+  supervisorConfigSubscribe: "supervisor.config.subscribe",
+  supervisorConfigUpdate: "supervisor.config.update",
+  supervisorProfilesList: "supervisor.profiles.list",
+  supervisorProfilesSubscribe: "supervisor.profiles.subscribe",
+  supervisorProfilesUpdate: "supervisor.profiles.update",
+  supervisorGoalsList: "supervisor.goals.list",
+  supervisorGoalsSubscribe: "supervisor.goals.subscribe",
+  supervisorGoalsRead: "supervisor.goals.read",
+  supervisorGoalsUpdate: "supervisor.goals.update",
+  supervisorGoalsCancel: "supervisor.goals.cancel",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -790,6 +821,70 @@ export const WsScheduledTasksRunNowRpc = Rpc.make(WS_METHODS.scheduledTasksRunNo
   error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
 });
 
+const SupervisorRpcError = Schema.Union([
+  SupervisorControlPlaneRpcError,
+  EnvironmentAuthorizationError,
+]);
+
+export const WsSupervisorConfigReadRpc = Rpc.make(WS_METHODS.supervisorConfigRead, {
+  payload: SupervisorConfigurationReadInput,
+  success: SupervisorConfigurationReadResult,
+  error: SupervisorRpcError,
+});
+export const WsSupervisorConfigSubscribeRpc = Rpc.make(WS_METHODS.supervisorConfigSubscribe, {
+  payload: SupervisorConfigurationReadInput,
+  success: SupervisorConfigurationReadResult,
+  error: SupervisorRpcError,
+  stream: true,
+});
+export const WsSupervisorConfigUpdateRpc = Rpc.make(WS_METHODS.supervisorConfigUpdate, {
+  payload: SupervisorConfigurationUpdateInput,
+  success: SupervisorConfigurationUpdateResult,
+  error: SupervisorRpcError,
+});
+export const WsSupervisorProfilesListRpc = Rpc.make(WS_METHODS.supervisorProfilesList, {
+  payload: ProjectExecutionProfileListInput,
+  success: ProjectExecutionProfileListResult,
+  error: SupervisorRpcError,
+});
+export const WsSupervisorProfilesSubscribeRpc = Rpc.make(WS_METHODS.supervisorProfilesSubscribe, {
+  payload: ProjectExecutionProfileListInput,
+  success: ProjectExecutionProfileListResult,
+  error: SupervisorRpcError,
+  stream: true,
+});
+export const WsSupervisorProfilesUpdateRpc = Rpc.make(WS_METHODS.supervisorProfilesUpdate, {
+  payload: ProjectExecutionProfileUpdateInput,
+  success: ProjectExecutionProfileUpdateResult,
+  error: SupervisorRpcError,
+});
+export const WsSupervisorGoalsListRpc = Rpc.make(WS_METHODS.supervisorGoalsList, {
+  payload: SupervisorGoalListInput,
+  success: SupervisorGoalListResult,
+  error: SupervisorRpcError,
+});
+export const WsSupervisorGoalsSubscribeRpc = Rpc.make(WS_METHODS.supervisorGoalsSubscribe, {
+  payload: SupervisorGoalListInput,
+  success: SupervisorGoalListResult,
+  error: SupervisorRpcError,
+  stream: true,
+});
+export const WsSupervisorGoalsReadRpc = Rpc.make(WS_METHODS.supervisorGoalsRead, {
+  payload: SupervisorGoalReadInput,
+  success: SupervisorGoalReadResult,
+  error: SupervisorRpcError,
+});
+export const WsSupervisorGoalsUpdateRpc = Rpc.make(WS_METHODS.supervisorGoalsUpdate, {
+  payload: SupervisorGoalUpdateInput,
+  success: SupervisorGoalUpdateResult,
+  error: SupervisorRpcError,
+});
+export const WsSupervisorGoalsCancelRpc = Rpc.make(WS_METHODS.supervisorGoalsCancel, {
+  payload: SupervisorGoalCancelInput,
+  success: SupervisorGoalCancelResult,
+  error: SupervisorRpcError,
+});
+
 export const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -818,6 +913,17 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksSetEnabledRpc,
   WsScheduledTasksDeleteRpc,
   WsScheduledTasksRunNowRpc,
+  WsSupervisorConfigReadRpc,
+  WsSupervisorConfigSubscribeRpc,
+  WsSupervisorConfigUpdateRpc,
+  WsSupervisorProfilesListRpc,
+  WsSupervisorProfilesSubscribeRpc,
+  WsSupervisorProfilesUpdateRpc,
+  WsSupervisorGoalsListRpc,
+  WsSupervisorGoalsSubscribeRpc,
+  WsSupervisorGoalsReadRpc,
+  WsSupervisorGoalsUpdateRpc,
+  WsSupervisorGoalsCancelRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
   WsSourceControlLookupRepositoryRpc,

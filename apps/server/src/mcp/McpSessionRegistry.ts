@@ -1,4 +1,4 @@
-import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { ProviderInstanceId, type ProviderSessionId, ThreadId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -7,13 +7,17 @@ import * as Layer from "effect/Layer";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import { HttpServer } from "effect/unstable/http";
 
+import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { isActiveDesignatedSupervisor } from "../supervisor/SupervisorControlPlaneService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpProviderSession from "./McpProviderSession.ts";
 
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
+  readonly runtimeProviderSessionId: ProviderSessionId;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly runtimeGeneration?: number;
 }
 
 export interface McpIssuedCredential {
@@ -28,6 +32,10 @@ export interface McpSessionRegistryShape {
   ) => Effect.Effect<McpInvocationContext.McpInvocationScope | undefined>;
   readonly revokeProviderSession: (providerSessionId: string) => Effect.Effect<void>;
   readonly revokeThread: (threadId: ThreadId) => Effect.Effect<void>;
+  readonly refreshSupervisorDesignation: (input: {
+    readonly previousThreadId: ThreadId | null;
+    readonly nextThreadId: ThreadId | null;
+  }) => Effect.Effect<void>;
   readonly revokeAll: Effect.Effect<void>;
 }
 
@@ -42,10 +50,20 @@ interface CredentialRecord {
 
 interface RegistryState {
   readonly records: ReadonlyMap<string, CredentialRecord>;
+  readonly runtimeOwnershipByThread: ReadonlyMap<
+    ThreadId,
+    {
+      readonly runtimeProviderSessionId: ProviderSessionId;
+      readonly providerInstanceId: ProviderInstanceId;
+      readonly runtimeGeneration: number;
+    }
+  >;
 }
 
 export interface McpSessionRegistryOptions {
   readonly now?: () => number;
+  readonly globalSupervisorThreadId?: ThreadId | undefined;
+  readonly isDesignatedSupervisor?: ((threadId: ThreadId) => Effect.Effect<boolean>) | undefined;
 }
 
 const bytesToHex = (bytes: Uint8Array): string =>
@@ -71,7 +89,10 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const environmentId = yield* environment.getEnvironmentId;
   const httpServer = yield* HttpServer.HttpServer;
-  const state = yield* SynchronizedRef.make<RegistryState>({ records: new Map() });
+  const state = yield* SynchronizedRef.make<RegistryState>({
+    records: new Map(),
+    runtimeOwnershipByThread: new Map(),
+  });
   const currentTimeMillis = options.now ? Effect.sync(options.now) : Clock.currentTimeMillis;
   const endpoint =
     httpServer.address._tag === "TcpAddress"
@@ -89,18 +110,36 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const providerSessionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
+      const threadId = ThreadId.make(request.threadId);
+      const advertisesGlobalOrchestration =
+        options.isDesignatedSupervisor === undefined
+          ? threadId === options.globalSupervisorThreadId
+          : yield* options.isDesignatedSupervisor(threadId);
       const scope: McpInvocationContext.McpInvocationScope = {
         environmentId,
-        threadId: ThreadId.make(request.threadId),
+        threadId,
         providerSessionId,
+        runtimeProviderSessionId: request.runtimeProviderSessionId,
+        runtimeGeneration: request.runtimeGeneration ?? 0,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
-        capabilities: new Set(McpInvocationContext.ALL_MCP_CAPABILITIES),
+        capabilities: new Set([
+          ...McpInvocationContext.ALL_MCP_CAPABILITIES,
+          ...(advertisesGlobalOrchestration
+            ? [McpInvocationContext.GLOBAL_ORCHESTRATION_MCP_CAPABILITY]
+            : []),
+        ]),
         issuedAt,
       };
-      yield* SynchronizedRef.update(state, ({ records }) => {
+      yield* SynchronizedRef.update(state, ({ records, runtimeOwnershipByThread }) => {
         const next = new Map(records);
         next.set(tokenHash, { scope });
-        return { records: next };
+        const nextRuntimeOwnership = new Map(runtimeOwnershipByThread);
+        nextRuntimeOwnership.set(threadId, {
+          runtimeProviderSessionId: scope.runtimeProviderSessionId,
+          providerInstanceId: scope.providerInstanceId,
+          runtimeGeneration: scope.runtimeGeneration ?? 0,
+        });
+        return { records: next, runtimeOwnershipByThread: nextRuntimeOwnership };
       });
       return {
         config: {
@@ -125,8 +164,9 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   );
 
   const revokeWhere = (predicate: (record: CredentialRecord) => boolean) =>
-    SynchronizedRef.update(state, ({ records }) => ({
+    SynchronizedRef.update(state, ({ records, runtimeOwnershipByThread }) => ({
       records: new Map(Array.from(records).filter(([, record]) => !predicate(record))),
+      runtimeOwnershipByThread,
     }));
 
   return McpSessionRegistry.of({
@@ -138,16 +178,71 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       },
     ),
     revokeThread: Effect.fn("McpSessionRegistry.revokeThread")(function* (threadId) {
-      yield* revokeWhere((record) => record.scope.threadId === threadId);
+      yield* SynchronizedRef.update(state, ({ records, runtimeOwnershipByThread }) => {
+        const nextRuntimeOwnership = new Map(runtimeOwnershipByThread);
+        nextRuntimeOwnership.delete(threadId);
+        return {
+          records: new Map(
+            Array.from(records).filter(([, record]) => record.scope.threadId !== threadId),
+          ),
+          runtimeOwnershipByThread: nextRuntimeOwnership,
+        };
+      });
     }),
-    revokeAll: SynchronizedRef.set(state, { records: new Map() }),
+    refreshSupervisorDesignation: Effect.fn("McpSessionRegistry.refreshSupervisorDesignation")(
+      function* (input) {
+        yield* SynchronizedRef.update(state, ({ records, runtimeOwnershipByThread }) => {
+          const nextRecords = new Map<string, CredentialRecord>();
+          const nextOwnership =
+            input.nextThreadId === null
+              ? undefined
+              : runtimeOwnershipByThread.get(input.nextThreadId);
+          for (const [tokenHash, record] of records) {
+            if (
+              record.scope.threadId !== input.previousThreadId &&
+              record.scope.threadId !== input.nextThreadId
+            ) {
+              nextRecords.set(tokenHash, record);
+              continue;
+            }
+            if (
+              record.scope.threadId === input.nextThreadId &&
+              (nextOwnership === undefined ||
+                record.scope.runtimeProviderSessionId !== nextOwnership.runtimeProviderSessionId ||
+                record.scope.providerInstanceId !== nextOwnership.providerInstanceId ||
+                (record.scope.runtimeGeneration ?? 0) !== nextOwnership.runtimeGeneration)
+            ) {
+              continue;
+            }
+            const capabilities = new Set(record.scope.capabilities);
+            if (record.scope.threadId === input.nextThreadId) {
+              capabilities.add(McpInvocationContext.GLOBAL_ORCHESTRATION_MCP_CAPABILITY);
+            } else {
+              capabilities.delete(McpInvocationContext.GLOBAL_ORCHESTRATION_MCP_CAPABILITY);
+            }
+            nextRecords.set(tokenHash, { scope: { ...record.scope, capabilities } });
+          }
+          return { records: nextRecords, runtimeOwnershipByThread };
+        });
+      },
+    ),
+    revokeAll: SynchronizedRef.set(state, {
+      records: new Map(),
+      runtimeOwnershipByThread: new Map(),
+    }),
   });
 });
 
 let activeMcpSessionRegistry: McpSessionRegistryShape | undefined;
 
 const make = Effect.acquireRelease(
-  makeWithOptions().pipe(
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    return yield* makeWithOptions({
+      globalSupervisorThreadId: config.experimentalGlobalSupervisorThreadId,
+      isDesignatedSupervisor: isActiveDesignatedSupervisor,
+    });
+  }).pipe(
     Effect.tap((registry) =>
       Effect.sync(() => {
         activeMcpSessionRegistry = registry;

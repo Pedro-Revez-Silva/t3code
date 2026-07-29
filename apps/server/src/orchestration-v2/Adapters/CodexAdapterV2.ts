@@ -24,6 +24,7 @@ import type {
   ProviderInstanceId,
   RuntimeMode,
   RuntimeRequestId,
+  RunAttemptId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as CodexClient from "effect-codex-app-server/client";
@@ -66,6 +67,7 @@ import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
 } from "../ProviderAdapterDriver.ts";
+import { isCodexNativeTurnAfterBarrier } from "../CodexResumeCorrelation.ts";
 import { IdAllocatorV2, type IdAllocatorV2Shape } from "../IdAllocator.ts";
 import {
   type ProviderContinuationRequest,
@@ -1413,6 +1415,17 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         const pendingSubagentTurns = yield* Ref.make(
           new Map<string, ReadonlyArray<PendingCodexSubagentTurnStarted>>(),
         );
+        const subagentResumeIntents = yield* Ref.make(
+          new Map<
+            string,
+            {
+              readonly parentAttemptId: RunAttemptId;
+              readonly parentProviderTurnId: ProviderTurnId;
+              readonly nativeItemId: string;
+              readonly nativeTurnIdBarrier: string;
+            }
+          >(),
+        );
         const nextProviderTurnOrdinals = yield* Ref.make(new Map<string, number>());
         const itemOrdinals = yield* Ref.make(new Map<string, number>());
         const nextItemOrdinalsByTurn = yield* Ref.make(new Map<string, number>());
@@ -1743,6 +1756,26 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           turn: PendingCodexSubagentTurnStarted,
         ) =>
           Effect.gen(function* () {
+            const currentRootContext = Array.from((yield* Ref.get(activeTurns)).values()).find(
+              (candidate) =>
+                candidate.subagent === null &&
+                candidate.providerThread.id === subagent.parentContext.providerThread.id &&
+                candidate.input.attemptId !== subagent.parentContext.input.attemptId,
+            );
+            const nativeSubagentThreadId = subagent.providerThread.nativeThreadRef?.nativeId ?? "";
+            const resumeIntent =
+              currentRootContext === undefined
+                ? undefined
+                : (yield* Ref.get(subagentResumeIntents)).get(nativeSubagentThreadId);
+            if (
+              currentRootContext !== undefined &&
+              (resumeIntent === undefined ||
+                resumeIntent.parentAttemptId !== currentRootContext.input.attemptId ||
+                resumeIntent.parentProviderTurnId !== currentRootContext.providerTurnId ||
+                !isCodexNativeTurnAfterBarrier(turn.nativeTurnId, resumeIntent.nativeTurnIdBarrier))
+            ) {
+              return;
+            }
             const terminalizedNativeTurns = yield* Ref.get(terminalizedNonCompletedNativeTurns);
             let ancestor: ActiveCodexTurnContext | undefined = subagent.parentContext;
             while (ancestor !== undefined) {
@@ -1814,6 +1847,24 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               updated.set(turn.nativeTurnId, activeContext);
               return updated;
             });
+            if (currentRootContext !== undefined && resumeIntent !== undefined) {
+              yield* emitProviderEvent({
+                type: "provider_thread.resume_confirmed",
+                driver: CODEX_PROVIDER,
+                parentProviderThreadId: currentRootContext.providerThread.id,
+                parentProviderTurnId: currentRootContext.providerTurnId,
+                childProviderThreadId: subagent.providerThread.id,
+                childThreadId: subagent.childThreadId,
+                nativeItemId: resumeIntent.nativeItemId,
+                nativeTurnIdBarrier: resumeIntent.nativeTurnIdBarrier,
+                nativeChildTurnId: turn.nativeTurnId,
+              });
+              yield* Ref.update(subagentResumeIntents, (current) => {
+                const updated = new Map(current);
+                updated.delete(nativeSubagentThreadId);
+                return updated;
+              });
+            }
             if (providerTurnOrdinal > 1 && subagent.task.status !== "running") {
               yield* emitSubagentTaskUpdate({
                 subagent,
@@ -1882,6 +1933,31 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           Effect.gen(function* () {
             const subagent = (yield* Ref.get(subagentThreads)).get(input.nativeThreadId);
             if (subagent !== undefined) {
+              const currentRootContext = Array.from((yield* Ref.get(activeTurns)).values()).find(
+                (candidate) =>
+                  candidate.subagent === null &&
+                  candidate.providerThread.id === subagent.parentContext.providerThread.id &&
+                  candidate.input.attemptId !== subagent.parentContext.input.attemptId,
+              );
+              if (currentRootContext !== undefined) {
+                const intent = (yield* Ref.get(subagentResumeIntents)).get(input.nativeThreadId);
+                if (
+                  intent === undefined ||
+                  intent.parentAttemptId !== currentRootContext.input.attemptId ||
+                  intent.parentProviderTurnId !== currentRootContext.providerTurnId ||
+                  !isCodexNativeTurnAfterBarrier(input.nativeTurnId, intent.nativeTurnIdBarrier)
+                ) {
+                  yield* Effect.logWarning(
+                    "orchestration-v2.codex-unconfirmed-subagent-resume-dropped",
+                    {
+                      nativeThreadId: input.nativeThreadId,
+                      nativeTurnId: input.nativeTurnId,
+                      currentRootTurnId: currentRootContext.nativeTurnId,
+                    },
+                  );
+                  return;
+                }
+              }
               yield* emitSubagentProviderTurnStarted(subagent, input);
               return;
             }
@@ -2141,6 +2217,49 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                 model,
                 ordinal: index + 1,
                 emitInitialPrompt: true,
+              });
+            }
+          });
+
+        const recordSubagentResumeIntents = (input: {
+          readonly context: ActiveCodexTurnContext;
+          readonly item: CodexCollabAgentToolCallItem;
+        }) =>
+          Effect.gen(function* () {
+            if (
+              input.context.subagent !== null ||
+              (input.item.tool !== "resumeAgent" && input.item.tool !== "sendInput")
+            ) {
+              return;
+            }
+            const subagents = yield* Ref.get(subagentThreads);
+            for (const nativeThreadId of input.item.receiverThreadIds) {
+              const subagent = subagents.get(nativeThreadId);
+              if (
+                subagent === undefined ||
+                subagent.parentContext.input.attemptId === input.context.input.attemptId
+              ) {
+                continue;
+              }
+              yield* Ref.update(subagentResumeIntents, (current) => {
+                const updated = new Map(current);
+                updated.set(nativeThreadId, {
+                  parentAttemptId: input.context.input.attemptId,
+                  parentProviderTurnId: input.context.providerTurnId,
+                  nativeItemId: input.item.id,
+                  nativeTurnIdBarrier: input.context.nativeTurnId,
+                });
+                return updated;
+              });
+              yield* emitProviderEvent({
+                type: "provider_thread.resume_requested",
+                driver: CODEX_PROVIDER,
+                parentProviderThreadId: input.context.providerThread.id,
+                parentProviderTurnId: input.context.providerTurnId,
+                childProviderThreadId: subagent.providerThread.id,
+                childThreadId: subagent.childThreadId,
+                nativeItemId: input.item.id,
+                nativeTurnIdBarrier: input.context.nativeTurnId,
               });
             }
           });
@@ -3151,6 +3270,14 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
 
             if (payload.item.type === "subAgentActivity") {
               yield* registerSubagentActivity({
+                context,
+                item: payload.item,
+              });
+              return;
+            }
+
+            if (payload.item.type === "collabAgentToolCall") {
+              yield* recordSubagentResumeIntents({
                 context,
                 item: payload.item,
               });

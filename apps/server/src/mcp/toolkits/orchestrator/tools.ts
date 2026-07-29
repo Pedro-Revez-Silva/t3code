@@ -8,7 +8,16 @@ import {
   OrchestratorMcpDeleteScheduledTaskInput,
   OrchestratorMcpDeleteScheduledTaskResult,
   OrchestratorMcpFailure,
+  OrchestratorMcpGoalCancelInput,
+  OrchestratorMcpGoalCreateInput,
+  OrchestratorMcpGoalListInput,
+  OrchestratorMcpGoalListResult,
+  OrchestratorMcpGoalReadInput,
+  OrchestratorMcpGoalResult,
+  OrchestratorMcpGoalTaskStartInput,
+  OrchestratorMcpGoalTaskStartResult,
   OrchestratorMcpListScheduledTasksResult,
+  OrchestratorMcpProjectListResult,
   OrchestratorMcpScheduleTaskInput,
   OrchestratorMcpScheduleTaskResult,
   OrchestratorMcpTaskCancelInput,
@@ -21,6 +30,8 @@ import {
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadInput,
   OrchestratorMcpThreadReadResult,
+  OrchestratorMcpThreadRespondInput,
+  OrchestratorMcpThreadRespondResult,
   OrchestratorMcpThreadSendInput,
   OrchestratorMcpThreadSendResult,
   OrchestratorMcpThreadStartInput,
@@ -49,7 +60,7 @@ export const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities
 
 export const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Delegate one task to a T3-owned child agent/subagent of THIS thread and run it with only the supplied task prompt, without copying parent conversation history. Use this whenever the user asks for an agent, subagent, worker, delegated task, or parallel help—including cross-provider work. The childThreadId is backing storage, not an ordinary top-level thread. Provider, model, model options (see orchestrator_capabilities), runtime mode, and interaction mode inherit unless target overrides them. Prefer mode='async' and poll task_status for long work; mode='wait' blocks until completion or timeout.",
+    "Delegate one task to a T3-owned child agent/subagent of THIS thread and run it with only the supplied task prompt, without copying parent conversation history. Use this whenever the user asks for an agent, subagent, worker, delegated task, or parallel help, including cross-provider and configured-supervisor cross-project work. Configured global supervisors may select another project with projectId; that child uses the selected project's root and is created atomically with its parent task relationship. The childThreadId is backing storage, not an ordinary top-level thread. Provider, model, model options (see orchestrator_capabilities), runtime mode, and interaction mode inherit unless target overrides them. Prefer mode='async' and poll task_status for long work; mode='wait' blocks until completion or timeout.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,
@@ -84,6 +95,68 @@ export const TaskCancelTool = Tool.make("task_cancel", {
   dependencies,
 })
   .annotate(Tool.Title, "Cancel delegated task")
+  .annotate(Tool.Destructive, true);
+
+export const GoalCreateTool = Tool.make("goal_create", {
+  description:
+    "Create one durable supervisor goal as a complete task DAG. Every dependency must name another taskKey in the same request; keys must be unique and the graph must be acyclic. Reuse clientRequestId when retrying.",
+  parameters: OrchestratorMcpGoalCreateInput,
+  success: OrchestratorMcpGoalResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Create a supervisor goal")
+  .annotate(Tool.Destructive, true);
+
+export const GoalListTool = Tool.make("goal_list", {
+  description: "List durable supervisor goals and their task DAG state.",
+  parameters: OrchestratorMcpGoalListInput,
+  success: OrchestratorMcpGoalListResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "List supervisor goals")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Idempotent, true);
+
+export const GoalReadTool = Tool.make("goal_read", {
+  description:
+    "Read one durable supervisor goal, including dependencies, attempts, and reconciled delegated-task state.",
+  parameters: OrchestratorMcpGoalReadInput,
+  success: OrchestratorMcpGoalResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Read a supervisor goal")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Idempotent, true);
+
+export const GoalTaskStartTool = Tool.make("goal_task_start", {
+  description:
+    "Start one ready task from a durable goal DAG. Dependencies must be complete. The reserved attempt and delegated work use deterministic idempotency keys, so retry this call after interruption instead of creating work manually.",
+  parameters: OrchestratorMcpGoalTaskStartInput,
+  success: OrchestratorMcpGoalTaskStartResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Start a ready goal task")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
+export const GoalCancelTool = Tool.make("goal_cancel", {
+  description:
+    "Cancel a durable supervisor goal and request cancellation of linked delegated work.",
+  parameters: OrchestratorMcpGoalCancelInput,
+  success: OrchestratorMcpGoalResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Cancel a supervisor goal")
   .annotate(Tool.Destructive, true);
 
 export const ScheduleTaskTool = Tool.make("schedule_task", {
@@ -151,7 +224,7 @@ export const CreateThreadsTool = Tool.make("create_threads", {
 
 export const ThreadStartTool = Tool.make("t3_thread_start", {
   description:
-    "Create an ordinary TOP-LEVEL T3 conversation and immediately start its first turn. This is not a child agent/subagent; use delegate_task for delegated work. The new thread inherits this thread's project, checkout, provider, model, and runtime settings unless overridden. Use t3_thread_wait and t3_thread_read to collect its result.",
+    "Create an ordinary TOP-LEVEL T3 conversation and immediately start its first turn. This is not a managed child agent/subagent, has no automatic supervisor wake guarantee, and must not replace delegate_task for delegated work. The new thread inherits this thread's project, checkout, provider, model, and runtime settings unless overridden. Configured global supervisors may select another project by projectId; that launch uses the selected project's root workspace. Use t3_thread_wait and t3_thread_read to collect its result.",
   parameters: OrchestratorMcpThreadStartInput,
   success: OrchestratorMcpCreatedThread,
   failure: OrchestratorMcpFailure,
@@ -162,9 +235,22 @@ export const ThreadStartTool = Tool.make("t3_thread_start", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+export const ProjectListTool = Tool.make("t3_project_list", {
+  description:
+    "List project IDs and titles in this T3 environment. Available only to the configured global supervisor; use a returned projectId with cross-project thread tools.",
+  success: OrchestratorMcpProjectListResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "List T3 projects")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
 export const ThreadListTool = Tool.make("t3_thread_list", {
   description:
-    "List T3 threads in the calling thread's project, newest first. Filter by durable run status or title and paginate with the returned cursor. Threads from other projects are never exposed.",
+    "List T3 threads in the calling thread's project, newest first. Configured global supervisors may select another project by projectId. Filter by durable run status or title and paginate with the returned cursor.",
   parameters: OrchestratorMcpThreadListInput,
   success: OrchestratorMcpThreadListResult,
   failure: OrchestratorMcpFailure,
@@ -178,7 +264,7 @@ export const ThreadListTool = Tool.make("t3_thread_list", {
 
 export const ThreadReadTool = Tool.make("t3_thread_read", {
   description:
-    "Read durable state and a paginated timeline from a T3 thread in the calling project. The default messages view returns user messages, assistant messages, and proposed plans; activity returns all summarized timeline items. Continue with afterPosition=nextPosition.",
+    "Read durable state and a paginated timeline from a T3 thread in the selected project (the calling project by default). The default messages view returns user messages, assistant messages, and proposed plans; activity returns all summarized timeline items. Continue with afterPosition=nextPosition.",
   parameters: OrchestratorMcpThreadReadInput,
   success: OrchestratorMcpThreadReadResult,
   failure: OrchestratorMcpFailure,
@@ -189,6 +275,19 @@ export const ThreadReadTool = Tool.make("t3_thread_read", {
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
+
+export const ThreadRespondTool = Tool.make("t3_thread_respond", {
+  description:
+    "Accept a command to deliver a response to one live pending runtime request returned by t3_thread_read.pendingRequests. Approval requests require decision; structured user-input requests require answers. Configured global supervisors may select another project by projectId. The result is accepted_for_delivery because V2 queues process-bound provider delivery after durable command acceptance; it does not claim provider acknowledgement. Reuse clientRequestId when retrying.",
+  parameters: OrchestratorMcpThreadRespondInput,
+  success: OrchestratorMcpThreadRespondResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Respond to a T3 thread request")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
 
 export const ThreadSendTool = Tool.make("t3_thread_send", {
   description:
@@ -234,14 +333,21 @@ export const OrchestratorToolkit = Toolkit.make(
   DelegateTaskTool,
   TaskStatusTool,
   TaskCancelTool,
+  GoalCreateTool,
+  GoalListTool,
+  GoalReadTool,
+  GoalTaskStartTool,
+  GoalCancelTool,
   ScheduleTaskTool,
   ListScheduledTasksTool,
   UpdateScheduledTaskTool,
   DeleteScheduledTaskTool,
   CreateThreadsTool,
+  ProjectListTool,
   ThreadStartTool,
   ThreadListTool,
   ThreadReadTool,
+  ThreadRespondTool,
   ThreadSendTool,
   ThreadWaitTool,
   ThreadInterruptTool,

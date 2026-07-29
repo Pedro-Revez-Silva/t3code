@@ -32,6 +32,8 @@ import * as ProviderRuntimeRecovery from "./orchestration-v2/ProviderRuntimeReco
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunch from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
+import * as SupervisorWake from "./orchestration-v2/SupervisorWakeService.ts";
+import * as SupervisorGoalCancellation from "./supervisor/SupervisorGoalCancellationService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -337,6 +339,9 @@ export const make = Effect.gen(function* () {
   const legacyV1ThreadImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const providerRuntimeRecovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const supervisorWake = yield* SupervisorWake.SupervisorWakeService;
+  const supervisorGoalCancellation =
+    yield* SupervisorGoalCancellation.SupervisorGoalCancellationService;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
   const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -447,6 +452,7 @@ export const make = Effect.gen(function* () {
       startEffectWorker: runStartupPhase(
         "orchestration-v2.effect-worker.start",
         Effect.gen(function* () {
+          yield* providerRuntimeRecovery.maintainProviderMutationLease.pipe(Effect.forkScoped);
           const workerFiber = yield* EffectWorker.runDaemon.pipe(Effect.forkScoped);
           yield* Ref.set(effectWorkerFiber, workerFiber);
           yield* agentAwarenessRelay.start();
@@ -461,9 +467,16 @@ export const make = Effect.gen(function* () {
       ).pipe(Effect.map((targets): AutoBootstrapWelcomeTargets => targets)),
     });
     yield* Effect.logInfo("V2 orchestration recovery completed", recovery);
+    const cancelledGoalInterruptions = yield* supervisorGoalCancellation.reconcileCancelledGoals;
+    if (cancelledGoalInterruptions > 0) {
+      yield* Effect.logInfo("Reconciled cancelled supervisor goal work", {
+        interruptedTaskCount: cancelledGoalInterruptions,
+      });
+    }
 
     yield* Effect.logDebug("Accepting commands");
     yield* commandGate.signalCommandReady;
+    yield* supervisorWake.run.pipe(Effect.forkScoped);
     yield* legacyV1ThreadImporter.importPendingTranscripts.pipe(
       Effect.tap((summary) =>
         summary.importedThreadCount === 0

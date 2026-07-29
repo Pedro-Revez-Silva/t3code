@@ -79,35 +79,45 @@ export const layerFromProjectRepository: Layer.Layer<
     const projects = yield* ProjectionProjects.ProjectionProjectRepository;
     return RuntimePolicyV2.of({
       resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
-        const cwd =
-          input.thread.worktreePath ??
-          (yield* projects.getById({ projectId: input.thread.projectId }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new RuntimePolicyResolveError({
-                  projectId: input.thread.projectId,
-                  providerInstanceId: input.modelSelection.instanceId,
-                  cause,
-                }),
-            ),
-            Effect.flatMap(
-              Option.match({
-                onNone: () =>
-                  Effect.fail(
-                    new RuntimePolicyResolveError({
-                      projectId: input.thread.projectId,
-                      providerInstanceId: input.modelSelection.instanceId,
-                      cause: "Project not found.",
-                    }),
-                  ),
-                onSome: (project) => Effect.succeed(project.workspaceRoot),
+        const project = yield* projects.getById({ projectId: input.thread.projectId }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new RuntimePolicyResolveError({
+                projectId: input.thread.projectId,
+                providerInstanceId: input.modelSelection.instanceId,
+                cause,
               }),
-            ),
-          ));
+          ),
+          Effect.flatMap(
+            Option.match({
+              onNone: () =>
+                Effect.fail(
+                  new RuntimePolicyResolveError({
+                    projectId: input.thread.projectId,
+                    providerInstanceId: input.modelSelection.instanceId,
+                    cause: "Project not found.",
+                  }),
+                ),
+              onSome: (project) =>
+                project.deletedAt !== null || project.workspaceRoot.trim() === ""
+                  ? Effect.fail(
+                      new RuntimePolicyResolveError({
+                        projectId: input.thread.projectId,
+                        providerInstanceId: input.modelSelection.instanceId,
+                        cause:
+                          project.deletedAt !== null
+                            ? "Project is deleted."
+                            : "Project workspace root is blank.",
+                      }),
+                    )
+                  : Effect.succeed(project),
+            }),
+          ),
+        );
         return ProviderAdapterV2RuntimePolicy.make({
           runtimeMode: input.thread.runtimeMode,
           interactionMode: input.thread.interactionMode,
-          cwd,
+          cwd: input.thread.worktreePath ?? project.workspaceRoot,
         });
       }),
     });

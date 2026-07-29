@@ -56,6 +56,11 @@ import Migration0040 from "./Migrations/040_ApplicationEventSource.ts";
 import Migration0041 from "./Migrations/041_OrchestrationV2EffectCancellation.ts";
 import Migration0042 from "./Migrations/042_ScheduledTasks.ts";
 import Migration0043 from "./Migrations/043_LegacyV1ImportState.ts";
+import Migration0044 from "./Migrations/044_SupervisorControlPlane.ts";
+import Migration0045 from "./Migrations/045_SupervisorCancellationRecovery.ts";
+import Migration0046 from "./Migrations/046_ProviderSessionQuarantineGeneration.ts";
+import Migration0047 from "./Migrations/047_ProviderAuthorityAcquisition.ts";
+import Migration0048 from "./Migrations/048_ProviderRollbackRecovery.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -111,6 +116,11 @@ export const migrationEntries = [
   [41, "OrchestrationV2EffectCancellation", Migration0041],
   [42, "ScheduledTasks", Migration0042],
   [43, "LegacyV1ImportState", Migration0043],
+  [44, "SupervisorControlPlane", Migration0044],
+  [45, "SupervisorCancellationRecovery", Migration0045],
+  [46, "ProviderSessionQuarantineGeneration", Migration0046],
+  [47, "ProviderAuthorityAcquisition", Migration0047],
+  [48, "ProviderRollbackRecovery", Migration0048],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

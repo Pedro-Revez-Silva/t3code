@@ -5948,7 +5948,9 @@ function ChatViewContent(props: ChatViewProps) {
               : null}
           <ChatHeader
             activeThreadTitle={activeThread.title}
+            environmentId={activeThread.environmentId}
             rightPanelOpen={inlineRightPanelOwnsTitleBar}
+            threadId={activeThread.id}
           />
         </header>
 

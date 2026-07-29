@@ -29,6 +29,36 @@ const handlers = {
       const service = yield* OrchestratorMcpService;
       return yield* service.cancelTask(scope, input);
     }),
+  goal_create: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext;
+      const service = yield* OrchestratorMcpService;
+      return yield* service.createGoal(scope, input);
+    }),
+  goal_list: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext;
+      const service = yield* OrchestratorMcpService;
+      return yield* service.listGoals(scope, input);
+    }),
+  goal_read: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext;
+      const service = yield* OrchestratorMcpService;
+      return yield* service.readGoal(scope, input);
+    }),
+  goal_task_start: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext;
+      const service = yield* OrchestratorMcpService;
+      return yield* service.startGoalTask(scope, input);
+    }),
+  goal_cancel: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext;
+      const service = yield* OrchestratorMcpService;
+      return yield* service.cancelGoal(scope, input);
+    }),
   schedule_task: (input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext;
@@ -63,21 +93,13 @@ const handlers = {
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext;
       const service = yield* OrchestratorMcpService;
-      const result = yield* service.createThreads(scope, {
-        ...(input.clientRequestId === undefined ? {} : { clientRequestId: input.clientRequestId }),
-        threads: [
-          {
-            prompt: input.prompt,
-            ...(input.title === undefined ? {} : { title: input.title }),
-            ...(input.target === undefined ? {} : { target: input.target }),
-            ...(input.runtimeMode === undefined ? {} : { runtimeMode: input.runtimeMode }),
-            ...(input.interactionMode === undefined
-              ? {}
-              : { interactionMode: input.interactionMode }),
-          },
-        ],
-      });
-      return result.threads[0]!;
+      return yield* service.startThread(scope, input);
+    }),
+  t3_project_list: () =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext;
+      const service = yield* OrchestratorMcpService;
+      return yield* service.listProjects(scope);
     }),
   t3_thread_list: (input) =>
     Effect.gen(function* () {
@@ -90,6 +112,12 @@ const handlers = {
       const scope = yield* McpInvocationContext;
       const service = yield* OrchestratorMcpService;
       return yield* service.readThread(scope, input);
+    }),
+  t3_thread_respond: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext;
+      const service = yield* OrchestratorMcpService;
+      return yield* service.respondToThreadRequest(scope, input);
     }),
   t3_thread_send: (input) =>
     Effect.gen(function* () {

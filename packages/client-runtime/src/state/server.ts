@@ -303,6 +303,34 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:scheduled-tasks:live",
       tag: WS_METHODS.scheduledTasksSubscribe,
     }),
+    supervisorConfigurationLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:supervisor:configuration",
+      tag: WS_METHODS.supervisorConfigSubscribe,
+    }),
+    supervisorProfilesLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:supervisor:profiles",
+      tag: WS_METHODS.supervisorProfilesSubscribe,
+    }),
+    supervisorGoalsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:supervisor:goals",
+      tag: WS_METHODS.supervisorGoalsSubscribe,
+    }),
+    supervisorConfiguration: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:supervisor:configuration:read",
+      tag: WS_METHODS.supervisorConfigRead,
+    }),
+    supervisorProfiles: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:supervisor:profiles:list",
+      tag: WS_METHODS.supervisorProfilesList,
+    }),
+    supervisorGoals: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:supervisor:goals:list",
+      tag: WS_METHODS.supervisorGoalsList,
+    }),
+    supervisorGoal: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:supervisor:goal:read",
+      tag: WS_METHODS.supervisorGoalsRead,
+    }),
     configProjection,
     welcome: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:welcome",
@@ -378,6 +406,26 @@ export function createServerEnvironmentAtoms<R, E>(
     runScheduledTaskNow: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:scheduled-task:run-now",
       tag: WS_METHODS.scheduledTasksRunNow,
+    }),
+    updateSupervisorConfiguration: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:supervisor:configuration:update",
+      tag: WS_METHODS.supervisorConfigUpdate,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    updateSupervisorProfile: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:supervisor:profile:update",
+      tag: WS_METHODS.supervisorProfilesUpdate,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    updateSupervisorGoal: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:supervisor:goal:update",
+      tag: WS_METHODS.supervisorGoalsUpdate,
+    }),
+    cancelSupervisorGoal: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:supervisor:goal:cancel",
+      tag: WS_METHODS.supervisorGoalsCancel,
     }),
   };
 }

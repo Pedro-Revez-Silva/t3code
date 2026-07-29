@@ -11,18 +11,29 @@ import {
   PositiveInt,
   ProjectId,
   RunId,
+  RuntimeRequestId,
   ScheduledTaskId,
+  SupervisorGoalId,
+  SupervisorTaskAttemptId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnItemId,
 } from "./baseSchemas.ts";
 import { ScheduledTaskRunStatus, ScheduledTaskSchedule } from "./scheduledTask.ts";
-import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
+import {
+  ProviderApprovalDecision,
+  ProviderInteractionMode,
+  ProviderRequestKind,
+  ProviderUserInputAnswers,
+  RuntimeMode,
+} from "./providerPolicy.ts";
 import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
+  OrchestrationV2RuntimeRequest,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
+  OrchestrationV2UserInputQuestion,
 } from "./orchestrationV2.ts";
 import {
   ProviderOptionDescriptor,
@@ -30,6 +41,11 @@ import {
   ProviderOptionSelectionValue,
 } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import {
+  SupervisorGoal,
+  SupervisorGoalStatus,
+  SupervisorGoalTaskDefinition,
+} from "./supervisorControlPlane.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)).annotate({
   description: "Complete task or message text for the target agent.",
@@ -152,6 +168,7 @@ export const OrchestratorMcpDelegatedTaskStatus = Schema.Literals([
 export type OrchestratorMcpDelegatedTaskStatus = typeof OrchestratorMcpDelegatedTaskStatus.Type;
 
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
+  projectId: Schema.optional(ProjectId),
   task: OrchestratorMcpPrompt.annotate({
     description: "Self-contained task for one delegated child agent/subagent.",
   }),
@@ -237,12 +254,25 @@ export const OrchestratorMcpCreatedThread = Schema.Struct({
 });
 export type OrchestratorMcpCreatedThread = typeof OrchestratorMcpCreatedThread.Type;
 
+export const OrchestratorMcpProjectListItem = Schema.Struct({
+  projectId: ProjectId,
+  title: Schema.String,
+});
+export type OrchestratorMcpProjectListItem = typeof OrchestratorMcpProjectListItem.Type;
+
+export const OrchestratorMcpProjectListResult = Schema.Struct({
+  currentProjectId: ProjectId,
+  projects: Schema.Array(OrchestratorMcpProjectListItem),
+});
+export type OrchestratorMcpProjectListResult = typeof OrchestratorMcpProjectListResult.Type;
+
 export const OrchestratorMcpCreateThreadsResult = Schema.Struct({
   threads: Schema.Array(OrchestratorMcpCreatedThread),
 });
 export type OrchestratorMcpCreateThreadsResult = typeof OrchestratorMcpCreateThreadsResult.Type;
 
 export const OrchestratorMcpThreadStartInput = Schema.Struct({
+  projectId: Schema.optional(ProjectId),
   prompt: OrchestratorMcpPrompt,
   title: Schema.optional(OrchestratorMcpTitle),
   target: Schema.optional(OrchestratorMcpTarget),
@@ -259,6 +289,7 @@ export const OrchestratorMcpThreadStatus = Schema.Union([
 export type OrchestratorMcpThreadStatus = typeof OrchestratorMcpThreadStatus.Type;
 
 export const OrchestratorMcpThreadListInput = Schema.Struct({
+  projectId: Schema.optional(ProjectId),
   statuses: Schema.optional(
     Schema.Array(OrchestratorMcpThreadStatus).check(Schema.isMaxLength(10)),
   ),
@@ -298,6 +329,7 @@ export const OrchestratorMcpThreadListResult = Schema.Struct({
 export type OrchestratorMcpThreadListResult = typeof OrchestratorMcpThreadListResult.Type;
 
 export const OrchestratorMcpThreadReadInput = Schema.Struct({
+  projectId: Schema.optional(ProjectId),
   threadId: ThreadId,
   view: Schema.optional(Schema.Literals(["messages", "activity"])),
   afterPosition: Schema.optional(NonNegativeInt),
@@ -363,16 +395,49 @@ export const OrchestratorMcpThreadTimelineItem = Schema.Struct({
 });
 export type OrchestratorMcpThreadTimelineItem = typeof OrchestratorMcpThreadTimelineItem.Type;
 
+export const OrchestratorMcpPendingRequest = Schema.Struct({
+  requestId: RuntimeRequestId,
+  kind: OrchestrationV2RuntimeRequest.fields.kind,
+  status: OrchestrationV2RuntimeRequest.fields.status,
+  respondable: Schema.Boolean,
+  notResumableReason: Schema.NullOr(Schema.String),
+  runId: Schema.NullOr(RunId),
+  nodeId: NodeId,
+  approvalPrompt: Schema.NullOr(Schema.String),
+  approvalRequestKind: Schema.NullOr(ProviderRequestKind),
+  questions: Schema.NullOr(Schema.Array(OrchestrationV2UserInputQuestion)),
+});
+export type OrchestratorMcpPendingRequest = typeof OrchestratorMcpPendingRequest.Type;
+
 export const OrchestratorMcpThreadReadResult = Schema.Struct({
   thread: OrchestratorMcpThreadDetail,
   recentRuns: Schema.Array(OrchestratorMcpThreadRun),
+  pendingRequests: Schema.Array(OrchestratorMcpPendingRequest),
   items: Schema.Array(OrchestratorMcpThreadTimelineItem),
   nextPosition: Schema.NullOr(NonNegativeInt),
   hasMore: Schema.Boolean,
 });
 export type OrchestratorMcpThreadReadResult = typeof OrchestratorMcpThreadReadResult.Type;
 
+export const OrchestratorMcpThreadRespondInput = Schema.Struct({
+  projectId: Schema.optional(ProjectId),
+  threadId: ThreadId,
+  requestId: RuntimeRequestId,
+  decision: Schema.optional(ProviderApprovalDecision),
+  answers: Schema.optional(ProviderUserInputAnswers),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpThreadRespondInput = typeof OrchestratorMcpThreadRespondInput.Type;
+
+export const OrchestratorMcpThreadRespondResult = Schema.Struct({
+  threadId: ThreadId,
+  requestId: RuntimeRequestId,
+  status: Schema.Literal("accepted_for_delivery"),
+});
+export type OrchestratorMcpThreadRespondResult = typeof OrchestratorMcpThreadRespondResult.Type;
+
 export const OrchestratorMcpThreadSendInput = Schema.Struct({
+  projectId: Schema.optional(ProjectId),
   threadId: ThreadId,
   message: OrchestratorMcpPrompt,
   mode: Schema.optional(Schema.Literals(["auto", "queue", "steer", "restart"])),
@@ -390,6 +455,7 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;
 
 export const OrchestratorMcpThreadWaitInput = Schema.Struct({
+  projectId: Schema.optional(ProjectId),
   threadId: ThreadId,
   runId: Schema.optional(RunId),
   timeoutMs: Schema.optional(Schema.Number),
@@ -405,6 +471,7 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
 export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitResult.Type;
 
 export const OrchestratorMcpThreadInterruptInput = Schema.Struct({
+  projectId: Schema.optional(ProjectId),
   threadId: ThreadId,
   runId: Schema.optional(RunId),
   reason: Schema.optional(Schema.String.check(Schema.isMaxLength(2_000))),
@@ -456,6 +523,7 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     threadManagement: Schema.Boolean,
     incrementalThreadRead: Schema.Boolean,
     scheduledTasks: Schema.Boolean,
+    globalProjectSupervision: Schema.Boolean,
     maxBatchThreads: Schema.Number,
   }),
 });
@@ -532,6 +600,42 @@ export const OrchestratorMcpDeleteScheduledTaskResult = Schema.Struct({
 export type OrchestratorMcpDeleteScheduledTaskResult =
   typeof OrchestratorMcpDeleteScheduledTaskResult.Type;
 
+export const OrchestratorMcpGoalCreateInput = Schema.Struct({
+  title: OrchestratorMcpTitle,
+  prompt: OrchestratorMcpPrompt,
+  tasks: Schema.Array(SupervisorGoalTaskDefinition).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(100),
+  ),
+  clientRequestId: OrchestratorMcpClientRequestId,
+});
+export type OrchestratorMcpGoalCreateInput = typeof OrchestratorMcpGoalCreateInput.Type;
+export const OrchestratorMcpGoalResult = Schema.Struct({ goal: SupervisorGoal });
+export type OrchestratorMcpGoalResult = typeof OrchestratorMcpGoalResult.Type;
+export const OrchestratorMcpGoalListInput = Schema.Struct({
+  status: Schema.optional(SupervisorGoalStatus),
+  limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }))),
+});
+export type OrchestratorMcpGoalListInput = typeof OrchestratorMcpGoalListInput.Type;
+export const OrchestratorMcpGoalListResult = Schema.Struct({ goals: Schema.Array(SupervisorGoal) });
+export type OrchestratorMcpGoalListResult = typeof OrchestratorMcpGoalListResult.Type;
+export const OrchestratorMcpGoalReadInput = Schema.Struct({ goalId: SupervisorGoalId });
+export type OrchestratorMcpGoalReadInput = typeof OrchestratorMcpGoalReadInput.Type;
+export const OrchestratorMcpGoalTaskStartInput = Schema.Struct({
+  goalId: SupervisorGoalId,
+  taskKey: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+});
+export type OrchestratorMcpGoalTaskStartInput = typeof OrchestratorMcpGoalTaskStartInput.Type;
+export const OrchestratorMcpGoalTaskStartResult = Schema.Struct({
+  goal: SupervisorGoal,
+  taskKey: TrimmedNonEmptyString,
+  attemptId: SupervisorTaskAttemptId,
+  delegatedTask: OrchestratorMcpDelegateTaskResult,
+});
+export type OrchestratorMcpGoalTaskStartResult = typeof OrchestratorMcpGoalTaskStartResult.Type;
+export const OrchestratorMcpGoalCancelInput = Schema.Struct({ goalId: SupervisorGoalId });
+export type OrchestratorMcpGoalCancelInput = typeof OrchestratorMcpGoalCancelInput.Type;
+
 export class OrchestratorMcpFailure extends Schema.TaggedErrorClass<OrchestratorMcpFailure>()(
   "OrchestratorMcpFailure",
   {
@@ -544,6 +648,7 @@ export class OrchestratorMcpFailure extends Schema.TaggedErrorClass<Orchestrator
       "interaction_mode_escalation_denied",
       "task_not_found",
       "task_not_cancellable",
+      "project_not_found",
       "thread_not_found",
       "run_not_found",
       "thread_not_sendable",

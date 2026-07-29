@@ -43,6 +43,13 @@ export function assertSubagentContinueOutput(
 
   const childProjection = result.projections.get(subagent.childThreadId);
   assert.isDefined(childProjection);
+  assert.lengthOf(
+    result.domainEvents.filter(
+      (event) => event.type === "thread.created" && event.payload.id === subagent.childThreadId,
+    ),
+    1,
+    "continuing an established Codex child must not recreate its app thread",
+  );
   assert.lengthOf(childProjection.runs, 0);
   assert.lengthOf(childProjection.providerTurns, 2);
   assertUserMessagesInclude(childProjection, [subagent.prompt, SUBAGENT_CONTINUE_CHILD_PROMPT]);

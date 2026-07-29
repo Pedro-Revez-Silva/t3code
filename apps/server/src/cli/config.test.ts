@@ -98,6 +98,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
                   T3CODE_NO_BROWSER: "true",
                   T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "false",
                   T3CODE_LOG_WS_EVENTS: "true",
+                  T3CODE_EXPERIMENTAL_GLOBAL_SUPERVISOR_THREAD_ID: "thread-global-supervisor",
                 },
               }),
             ),
@@ -124,6 +125,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: true,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        experimentalGlobalSupervisorThreadId: "thread-global-supervisor",
       });
       assert.equal(resolved.stateDir, join(baseDir, "userdata"));
     }),

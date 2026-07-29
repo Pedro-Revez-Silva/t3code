@@ -22,6 +22,14 @@ describe("resolveT3McpToolPresentation", () => {
       displayName: "List scheduled tasks",
       logo: "t3-code",
     });
+    expect(resolveT3McpToolPresentation("t3_project_list")).toEqual({
+      displayName: "List T3 projects",
+      logo: "t3-code",
+    });
+    expect(resolveT3McpToolPresentation("t3_thread_respond")).toEqual({
+      displayName: "Respond to a T3 thread request",
+      logo: "t3-code",
+    });
   });
 
   it("pretty prints worktree T3 MCP tool names", () => {

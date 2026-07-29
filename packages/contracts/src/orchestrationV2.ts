@@ -582,6 +582,8 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
     Schema.Literals(["dynamic_tool_call", "user_input", "auth_refresh"]),
   ]),
   status: Schema.Literals(["pending", "resolved", "expired", "cancelled"]),
+  responseCommandId: Schema.optional(CommandId),
+  responseAttempt: Schema.optional(NonNegativeInt),
   responseCapability: Schema.Union([
     Schema.Struct({ type: Schema.Literal("live"), providerSessionId: ProviderSessionId }),
     Schema.Struct({ type: Schema.Literal("not_resumable"), reason: Schema.String }),
@@ -1971,6 +1973,7 @@ export const OrchestrationV2Command = Schema.Union([
     parentNodeId: NodeId,
     task: TrimmedNonEmptyString,
     title: Schema.optional(TrimmedNonEmptyString),
+    targetProjectId: Schema.optional(ProjectId),
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,

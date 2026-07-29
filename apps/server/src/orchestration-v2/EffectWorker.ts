@@ -53,6 +53,12 @@ export interface OrchestrationEffectExecutorV2Shape {
   readonly execute: (
     effect: OrchestrationEffectV2,
   ) => Effect.Effect<void, OrchestrationEffectExecutionError>;
+  readonly onTerminalFailure?: (
+    effect: OrchestrationEffectV2,
+    workerId: string,
+    error: string,
+  ) => Effect.Effect<boolean, OrchestrationEffectExecutionError>;
+  readonly shouldRetryAfterMaxAttempts?: (effect: OrchestrationEffectV2) => Effect.Effect<boolean>;
 }
 
 export class OrchestrationEffectExecutorV2 extends Context.Service<
@@ -80,6 +86,32 @@ export const executorLayer: Layer.Layer<
     const providerTurnStart = yield* ProviderTurnStartServiceV2;
     const runtimeRequests = yield* RuntimeRequestServiceV2;
     return OrchestrationEffectExecutorV2.of({
+      shouldRetryAfterMaxAttempts: (effect) =>
+        effect.request.type === "runtime-request.respond"
+          ? runtimeRequests.isDeliveryAcknowledged(effect.request.requestId)
+          : Effect.succeed(false),
+      onTerminalFailure: (effect, workerId, error) =>
+        effect.request.type === "runtime-request.respond"
+          ? runtimeRequests
+              .releasePendingResponse({
+                threadId: effect.threadId,
+                requestId: effect.request.requestId,
+                commandId: effect.commandId,
+                effectId: effect.id,
+                workerId,
+                error,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              )
+          : Effect.succeed(false),
       execute: (effect) => {
         switch (effect.request.type) {
           case "provider-session.detach":
@@ -204,6 +236,7 @@ export const executorLayer: Layer.Layer<
                 threadId: effect.threadId,
                 providerSessionId: effect.request.providerSessionId,
                 requestId: effect.request.requestId,
+                commandId: effect.commandId,
                 ...(effect.request.decision === undefined
                   ? {}
                   : { decision: effect.request.decision }),
@@ -385,9 +418,48 @@ export const layerWithOptions = (
         });
         // Prefer succeed for terminal interrupt races so the outbox does not
         // keep a failed interrupt around; fail only when we must not retry.
+        const retryAfterMaxAttempts =
+          !nonRetryable &&
+          effect.attemptCount >= maxAttempts &&
+          executor.shouldRetryAfterMaxAttempts !== undefined
+            ? yield* executor.shouldRetryAfterMaxAttempts(effect)
+            : false;
+        const terminalFailure =
+          nonRetryable || (effect.attemptCount >= maxAttempts && !retryAfterMaxAttempts);
+        if (terminalFailure && executor.onTerminalFailure !== undefined) {
+          const terminalized = yield* Effect.exit(
+            executor.onTerminalFailure(effect, workerId, error),
+          );
+          if (Exit.isSuccess(terminalized) && terminalized.value) {
+            return true;
+          }
+          if (Exit.isFailure(terminalized)) {
+            const current = yield* outbox.get(effect.id);
+            if (
+              Option.isSome(current) &&
+              (current.value.status === "failed" ||
+                current.value.status === "succeeded" ||
+                current.value.status === "cancelled")
+            ) {
+              return true;
+            }
+            const requeued = yield* outbox.retry({
+              effectId: effect.id,
+              workerId,
+              error: `${error}\nTerminalization failed: ${Cause.pretty(terminalized.cause)}`,
+              delayMs: 100,
+            });
+            if (requeued) return true;
+            return yield* new OrchestrationEffectWorkerError({
+              operation: "terminalize",
+              effectId: effect.id,
+              cause: terminalized.cause,
+            });
+          }
+        }
         const updated = nonRetryable
           ? yield* outbox.succeed({ effectId: effect.id, workerId })
-          : effect.attemptCount >= maxAttempts
+          : effect.attemptCount >= maxAttempts && !retryAfterMaxAttempts
             ? yield* outbox.fail({ effectId: effect.id, workerId, error })
             : yield* outbox.retry({
                 effectId: effect.id,

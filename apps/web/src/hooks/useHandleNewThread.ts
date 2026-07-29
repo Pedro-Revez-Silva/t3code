@@ -11,6 +11,7 @@ import {
   markPromotedDraftThreadByRef,
   type DraftThreadEnvMode,
   type DraftThreadState,
+  type ProjectDraftSession,
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { newDraftId, newThreadId } from "../lib/utils";
@@ -26,6 +27,17 @@ import { primaryServerSettingsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { useClientSettings } from "./useSettings";
+
+export async function runDraftReadyBeforeNavigation(
+  draft: ProjectDraftSession | null,
+  onDraftReady: ((draft: ProjectDraftSession) => void | Promise<void>) | undefined,
+  navigate?: () => void | Promise<void>,
+): Promise<void> {
+  if (draft) {
+    await onDraftReady?.(draft);
+  }
+  await navigate?.();
+}
 
 export function useNewThreadHandler() {
   const projects = useProjects();
@@ -51,6 +63,7 @@ export function useNewThreadHandler() {
         envMode?: DraftThreadEnvMode;
         startFromOrigin?: boolean;
         replace?: boolean;
+        onDraftReady?: (draft: ProjectDraftSession) => void | Promise<void>;
       },
     ): Promise<void> => {
       const {
@@ -191,22 +204,27 @@ export function useNewThreadHandler() {
             reusableStoredDraftThread.draftId,
             {
               threadId: reusableStoredDraftThread.threadId,
-              ...(workspaceContext ?? {}),
+              ...workspaceContext,
               ...(carryRuntimeMode ? { runtimeMode: carryRuntimeMode } : {}),
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             },
           );
-          if (
+          const readyDraft = getDraftSessionByLogicalProjectKey(logicalProjectKey);
+          const draftAlreadyOpen =
             currentRouteTarget?.kind === "draft" &&
-            currentRouteTarget.draftId === reusableStoredDraftThread.draftId
-          ) {
-            return;
-          }
-          await router.navigate({
-            to: "/draft/$draftId",
-            params: { draftId: reusableStoredDraftThread.draftId },
-            replace: options?.replace ?? false,
-          });
+            currentRouteTarget.draftId === reusableStoredDraftThread.draftId;
+          await runDraftReadyBeforeNavigation(
+            readyDraft,
+            options?.onDraftReady,
+            draftAlreadyOpen
+              ? undefined
+              : () =>
+                  router.navigate({
+                    to: "/draft/$draftId",
+                    params: { draftId: reusableStoredDraftThread.draftId },
+                    replace: options?.replace ?? false,
+                  }),
+          );
         })();
       }
 
@@ -239,7 +257,8 @@ export function useNewThreadHandler() {
           ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
           ...(hasStartFromOriginOption ? { startFromOrigin: options?.startFromOrigin } : {}),
         });
-        return Promise.resolve();
+        const readyDraft = getDraftSessionByLogicalProjectKey(logicalProjectKey);
+        return runDraftReadyBeforeNavigation(readyDraft, options?.onDraftReady);
       }
 
       const draftId = newDraftId();
@@ -272,11 +291,14 @@ export function useNewThreadHandler() {
           setModelSelection(draftId, carryModelSelection, { replaceOptions: true });
         }
 
-        await router.navigate({
-          to: "/draft/$draftId",
-          params: { draftId },
-          replace: options?.replace ?? false,
-        });
+        const readyDraft = getDraftSessionByLogicalProjectKey(logicalProjectKey);
+        await runDraftReadyBeforeNavigation(readyDraft, options?.onDraftReady, () =>
+          router.navigate({
+            to: "/draft/$draftId",
+            params: { draftId },
+            replace: options?.replace ?? false,
+          }),
+        );
       })();
     },
     [getCurrentRouteTarget, primaryServerSettings, projectGroupingSettings, projects, router],

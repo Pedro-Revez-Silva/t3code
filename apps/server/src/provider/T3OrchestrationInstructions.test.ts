@@ -12,12 +12,23 @@ describe("T3 orchestration provider instructions", () => {
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "ordinary top-level T3 conversations");
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "Never use them merely");
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "different provider");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "different project");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "do not assume they automatically wake");
   });
 
   it("documents structured schedules instead of JSON strings", () => {
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "structured object, never as JSON text");
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, '"everyMs":3600000');
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "bindToCurrentThread=false");
+  });
+
+  it("conditions global project instructions on the advertised feature", () => {
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "globalProjectSupervision=true");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "use `t3_project_list`");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "pass `projectId` to `delegate_task`");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "Otherwise these operations remain scoped");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "inspect `pendingRequests`");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "`t3_thread_respond`");
   });
 
   it("injects prompt fallback only for an MCP-enabled first run", () => {

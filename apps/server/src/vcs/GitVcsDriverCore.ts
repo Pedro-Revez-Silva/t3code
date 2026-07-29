@@ -61,6 +61,14 @@ const STATUS_UPSTREAM_REFRESH_ENV = Object.freeze({
 } satisfies NodeJS.ProcessEnv);
 const DEFAULT_BASE_BRANCH_CANDIDATES = ["main", "master"] as const;
 const GIT_LIST_BRANCHES_DEFAULT_LIMIT = 100;
+export interface GitVcsDriverCoreOptions {
+  /** Test-only barrier used to exercise the post-add cleanup boundary. */
+  readonly afterWorktreeAdd?: (input: {
+    readonly cwd: string;
+    readonly worktreePath: string;
+    readonly newRefName: string | undefined;
+  }) => Effect.Effect<void>;
+}
 const NON_REPOSITORY_STATUS_DETAILS = Object.freeze<GitVcsDriver.GitStatusDetails>({
   isRepo: false,
   hasOriginRemote: false,
@@ -634,7 +642,9 @@ const collectOutput = Effect.fnUntraced(function* (
   };
 });
 
-export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* () {
+export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* (
+  options: GitVcsDriverCoreOptions = {},
+) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -2272,30 +2282,67 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       ? ["worktree", "add", "-b", input.newRefName, worktreePath, input.refName]
       : ["worktree", "add", worktreePath, input.refName];
 
-    yield* executeGit("GitVcsDriver.createWorktree", input.cwd, args, {
-      fallbackErrorDetail: "git worktree add failed",
-    });
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        yield* restore(
+          executeGit("GitVcsDriver.createWorktree", input.cwd, args, {
+            fallbackErrorDetail: "git worktree add failed",
+          }),
+        );
 
-    if (input.newRefName && input.baseRefName) {
-      const remoteNames = yield* listRemoteNames(input.cwd).pipe(Effect.orElseSucceed(() => []));
-      const parsedBaseRef = parseRemoteRefWithRemoteNames(
-        input.baseRefName,
-        remoteNames.toSorted((left, right) => right.length - left.length),
-      );
-      const baseBranch = parsedBaseRef?.branchName ?? input.baseRefName;
-      yield* runGit("GitVcsDriver.createWorktree.configureBaseRef", input.cwd, [
-        "config",
-        `branch.${input.newRefName}.gh-merge-base`,
-        baseBranch,
-      ]);
-    }
+        const rollback = Effect.gen(function* () {
+          yield* executeGit(
+            "GitVcsDriver.createWorktree.rollbackWorktree",
+            input.cwd,
+            ["worktree", "remove", "--force", worktreePath],
+            { timeoutMs: 15_000, fallbackErrorDetail: "git worktree rollback failed" },
+          ).pipe(Effect.ignoreCause({ log: true }));
+          if (input.newRefName !== undefined) {
+            yield* executeGit(
+              "GitVcsDriver.createWorktree.rollbackBranch",
+              input.cwd,
+              ["branch", "-D", "--", input.newRefName],
+              { timeoutMs: 10_000, fallbackErrorDetail: "git branch rollback failed" },
+            ).pipe(Effect.ignoreCause({ log: true }));
+          }
+        });
 
-    return {
-      worktree: {
-        path: worktreePath,
-        refName: targetBranch,
-      },
-    };
+        const finish = Effect.gen(function* () {
+          if (options.afterWorktreeAdd !== undefined) {
+            yield* options.afterWorktreeAdd({
+              cwd: input.cwd,
+              worktreePath,
+              newRefName: input.newRefName,
+            });
+          }
+          if (input.newRefName && input.baseRefName) {
+            const remoteNames = yield* listRemoteNames(input.cwd).pipe(
+              Effect.orElseSucceed(() => []),
+            );
+            const parsedBaseRef = parseRemoteRefWithRemoteNames(
+              input.baseRefName,
+              remoteNames.toSorted((left, right) => right.length - left.length),
+            );
+            const baseBranch = parsedBaseRef?.branchName ?? input.baseRefName;
+            yield* runGit("GitVcsDriver.createWorktree.configureBaseRef", input.cwd, [
+              "config",
+              `branch.${input.newRefName}.gh-merge-base`,
+              baseBranch,
+            ]);
+          }
+
+          return {
+            worktree: {
+              path: worktreePath,
+              refName: targetBranch,
+            },
+          };
+        });
+        return yield* restore(finish).pipe(
+          Effect.onExit((exit) => (Exit.isFailure(exit) ? rollback : Effect.void)),
+        );
+      }),
+    );
   });
 
   const fetchPullRequestBranch: GitVcsDriver.GitVcsDriver["Service"]["fetchPullRequestBranch"] =
@@ -2507,6 +2554,15 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     },
   );
 
+  const deleteLocalBranch: GitVcsDriver.GitVcsDriver["Service"]["deleteLocalBranch"] = Effect.fn(
+    "deleteLocalBranch",
+  )((input) =>
+    executeGit("GitVcsDriver.deleteLocalBranch", input.cwd, ["branch", "-D", "--", input.branch], {
+      timeoutMs: 10_000,
+      fallbackErrorDetail: "git branch deletion failed",
+    }).pipe(Effect.asVoid),
+  );
+
   const createRef: GitVcsDriver.GitVcsDriver["Service"]["createRef"] = Effect.fn("createRef")(
     function* (input) {
       yield* executeGit("GitVcsDriver.createRef", input.cwd, ["branch", input.refName], {
@@ -2572,6 +2628,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     fetchRemoteTrackingBranch,
     setBranchUpstream,
     removeWorktree,
+    deleteLocalBranch,
     renameBranch,
     createRef,
     switchRef,

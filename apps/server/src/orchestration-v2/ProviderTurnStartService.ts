@@ -5,6 +5,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
+  type OrchestrationV2Subagent,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -23,6 +24,7 @@ import { IdAllocatorV2 } from "./IdAllocator.ts";
 import { ProjectionStoreV2 } from "./ProjectionStore.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { canRouteRelatedSubagent, RunExecutionServiceV2 } from "./RunExecutionService.ts";
+import { ProviderSessionGenerationStore } from "./ProviderSessionGenerationStore.ts";
 import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
 
 export class ProviderTurnStartError extends Schema.TaggedErrorClass<ProviderTurnStartError>()(
@@ -34,6 +36,19 @@ export class ProviderTurnStartError extends Schema.TaggedErrorClass<ProviderTurn
 ) {}
 
 const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
+
+export function canSeedRelatedSubagent(
+  subagent: Pick<OrchestrationV2Subagent, "id" | "origin" | "runId" | "status">,
+  runId: RunId,
+  currentAttemptSubagentNodeIds: ReadonlySet<OrchestrationV2Subagent["id"]>,
+): boolean {
+  return (
+    subagent.origin === "provider_native" &&
+    subagent.runId === runId &&
+    currentAttemptSubagentNodeIds.has(subagent.id) &&
+    canRouteRelatedSubagent(subagent.status)
+  );
+}
 
 export interface ProviderTurnStartServiceV2Shape {
   readonly start: (input: {
@@ -55,6 +70,7 @@ export const layer: Layer.Layer<
   | IdAllocatorV2
   | ProjectionStoreV2
   | ProviderSessionManagerV2
+  | ProviderSessionGenerationStore
   | RunExecutionServiceV2
   | RuntimePolicyV2
 > = Layer.effect(
@@ -65,6 +81,7 @@ export const layer: Layer.Layer<
     const idAllocator = yield* IdAllocatorV2;
     const projectionStore = yield* ProjectionStoreV2;
     const providerSessions = yield* ProviderSessionManagerV2;
+    const providerSessionGenerations = yield* ProviderSessionGenerationStore;
     const runExecution = yield* RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicyV2;
 
@@ -125,6 +142,16 @@ export const layer: Layer.Layer<
         });
       }
       const providerSessionId = providerThread.providerSessionId;
+      const providerSessionGeneration = yield* providerSessionGenerations.state({
+        threadId: projection.thread.id,
+        providerInstanceId: run.providerInstanceId,
+      });
+      if (providerSessionGeneration.quarantinedProviderSessionId === providerSessionId) {
+        return yield* new ProviderTurnStartError({
+          runId,
+          cause: `Provider session ${providerSessionId} was quarantined before the turn started.`,
+        });
+      }
       const isCurrentAttemptInStatus = (
         expectedStatus: OrchestrationV2Run["status"],
       ): Effect.Effect<boolean, never> =>
@@ -283,9 +310,15 @@ export const layer: Layer.Layer<
         return;
       }
       const now = yield* DateTime.now;
+      const acquiredProviderThreadId =
+        session.driver === "opencode" &&
+        providerThread.nativeThreadRef === null &&
+        loadedProviderThread.nativeThreadRef !== null
+          ? loadedProviderThread.id
+          : providerThread.id;
       const runningProviderThread: OrchestrationV2ProviderThread = {
         ...loadedProviderThread,
-        id: providerThread.id,
+        id: acquiredProviderThreadId,
         driver: session.driver,
         providerInstanceId: run.providerInstanceId,
         providerSessionId,
@@ -301,16 +334,19 @@ export const layer: Layer.Layer<
       };
       const runningRun: OrchestrationV2Run = {
         ...run,
+        providerThreadId: acquiredProviderThreadId,
         status: "running",
         startedAt: now,
       };
       const runningAttempt: OrchestrationV2RunAttempt = {
         ...attempt,
+        providerThreadId: acquiredProviderThreadId,
         status: "running",
         startedAt: now,
       };
       const runningRootNode: OrchestrationV2ExecutionNode = {
         ...rootNode,
+        providerThreadId: acquiredProviderThreadId,
         status: "running",
         startedAt: now,
       };
@@ -327,6 +363,22 @@ export const layer: Layer.Layer<
           occurredAt: now,
           payload: session.providerSession,
         },
+        ...(acquiredProviderThreadId === providerThread.id
+          ? []
+          : [
+              {
+                id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
+                type: "thread.metadata-updated" as const,
+                threadId: projection.thread.id,
+                providerInstanceId: run.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...projection.thread,
+                  activeProviderThreadId: acquiredProviderThreadId,
+                  updatedAt: now,
+                },
+              },
+            ]),
         {
           id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
           type: "provider-thread.updated",
@@ -398,13 +450,37 @@ export const layer: Layer.Layer<
         runId: run.id,
         activeAttemptId: attempt.id,
         expectedStatus: "starting",
+        providerAuthority: {
+          threadId: projection.thread.id,
+          providerSessionId,
+          providerInstanceId: run.providerInstanceId,
+          generation: providerSessionGeneration.generation,
+          providerThreadId: acquiredProviderThreadId,
+          runId: run.id,
+          activeAttemptId: attempt.id,
+        },
         events,
       });
       if (!runningWrite.committed) {
         return;
       }
-      const routableSubagents = projection.subagents.filter((subagent) =>
-        canRouteRelatedSubagent(subagent.status),
+      const currentAttemptProviderTurnIds = new Set(
+        projection.providerTurns
+          .filter((turn) => turn.runAttemptId === attempt.id)
+          .map((turn) => turn.id),
+      );
+      const currentAttemptSubagentNodeIds = new Set(
+        projection.nodes.flatMap((node) =>
+          node.kind === "subagent" &&
+          node.runId === run.id &&
+          node.providerTurnId !== null &&
+          currentAttemptProviderTurnIds.has(node.providerTurnId)
+            ? [node.id]
+            : [],
+        ),
+      );
+      const currentAttemptSubagents = projection.subagents.filter((subagent) =>
+        canSeedRelatedSubagent(subagent, run.id, currentAttemptSubagentNodeIds),
       );
       yield* runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
@@ -417,10 +493,11 @@ export const layer: Layer.Layer<
         providerThread: runningProviderThread,
         attempt: runningAttempt,
         attemptId: attempt.id,
-        relatedThreadIds: routableSubagents.flatMap((subagent) =>
+        providerGeneration: providerSessionGeneration.generation,
+        relatedThreadIds: currentAttemptSubagents.flatMap((subagent) =>
           subagent.childThreadId === null ? [] : [subagent.childThreadId],
         ),
-        relatedProviderThreadIds: routableSubagents.flatMap((subagent) =>
+        relatedProviderThreadIds: currentAttemptSubagents.flatMap((subagent) =>
           subagent.providerThreadId === null ? [] : [subagent.providerThreadId],
         ),
         providerTurnOrdinal:

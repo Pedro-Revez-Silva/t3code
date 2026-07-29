@@ -74,6 +74,9 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ThreadManagementService from "./orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
+import * as SupervisorControlPlane from "./supervisor/SupervisorControlPlaneService.ts";
+import * as SupervisorDesignation from "./supervisor/SupervisorDesignationService.ts";
+import * as SupervisorGoalCancellation from "./supervisor/SupervisorGoalCancellationService.ts";
 import {
   archivedShellStreamItemFromSnapshot,
   coalesceShellApplicationEvents,
@@ -340,6 +343,17 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.scheduledTasksSetEnabled, AuthOrchestrationOperateScope],
   [WS_METHODS.scheduledTasksDelete, AuthOrchestrationOperateScope],
   [WS_METHODS.scheduledTasksRunNow, AuthOrchestrationOperateScope],
+  [WS_METHODS.supervisorConfigRead, AuthOrchestrationReadScope],
+  [WS_METHODS.supervisorConfigSubscribe, AuthOrchestrationReadScope],
+  [WS_METHODS.supervisorConfigUpdate, AuthOrchestrationOperateScope],
+  [WS_METHODS.supervisorProfilesList, AuthOrchestrationReadScope],
+  [WS_METHODS.supervisorProfilesSubscribe, AuthOrchestrationReadScope],
+  [WS_METHODS.supervisorProfilesUpdate, AuthOrchestrationOperateScope],
+  [WS_METHODS.supervisorGoalsList, AuthOrchestrationReadScope],
+  [WS_METHODS.supervisorGoalsSubscribe, AuthOrchestrationReadScope],
+  [WS_METHODS.supervisorGoalsRead, AuthOrchestrationReadScope],
+  [WS_METHODS.supervisorGoalsUpdate, AuthOrchestrationOperateScope],
+  [WS_METHODS.supervisorGoalsCancel, AuthOrchestrationOperateScope],
   [WS_METHODS.cloudGetRelayClientStatus, AuthRelayWriteScope],
   [WS_METHODS.cloudInstallRelayClient, AuthRelayWriteScope],
   [WS_METHODS.sourceControlLookupRepository, AuthOrchestrationReadScope],
@@ -478,6 +492,10 @@ const makeWsRpcLayer = (
       );
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
+      const supervisorControlPlane = yield* SupervisorControlPlane.SupervisorControlPlaneService;
+      const supervisorDesignation = yield* SupervisorDesignation.SupervisorDesignationService;
+      const supervisorGoalCancellation =
+        yield* SupervisorGoalCancellation.SupervisorGoalCancellationService;
       const projectService = yield* ProjectService.ProjectService;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
@@ -1242,6 +1260,70 @@ const makeWsRpcLayer = (
             "rpc.aggregate": "scheduledTasks",
             "scheduled_task.id": input.id,
           }),
+        [WS_METHODS.supervisorConfigRead]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.supervisorConfigRead,
+            supervisorControlPlane.readConfiguration(),
+            { "rpc.aggregate": "supervisor" },
+          ),
+        [WS_METHODS.supervisorConfigSubscribe]: (_input) =>
+          observeRpcStream(
+            WS_METHODS.supervisorConfigSubscribe,
+            supervisorControlPlane.subscribeConfiguration(),
+            { "rpc.aggregate": "supervisor" },
+          ),
+        [WS_METHODS.supervisorConfigUpdate]: (input) =>
+          observeRpcEffect(WS_METHODS.supervisorConfigUpdate, supervisorDesignation.update(input), {
+            "rpc.aggregate": "supervisor",
+          }),
+        [WS_METHODS.supervisorProfilesList]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.supervisorProfilesList,
+            supervisorControlPlane.listProfiles(),
+            { "rpc.aggregate": "supervisor" },
+          ),
+        [WS_METHODS.supervisorProfilesSubscribe]: (_input) =>
+          observeRpcStream(
+            WS_METHODS.supervisorProfilesSubscribe,
+            supervisorControlPlane.subscribeProfiles(),
+            { "rpc.aggregate": "supervisor" },
+          ),
+        [WS_METHODS.supervisorProfilesUpdate]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.supervisorProfilesUpdate,
+            supervisorControlPlane.updateProfile(input),
+            { "rpc.aggregate": "supervisor" },
+          ),
+        [WS_METHODS.supervisorGoalsList]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.supervisorGoalsList,
+            supervisorControlPlane.listGoals(input),
+            { "rpc.aggregate": "supervisor" },
+          ),
+        [WS_METHODS.supervisorGoalsSubscribe]: (input) =>
+          observeRpcStream(
+            WS_METHODS.supervisorGoalsSubscribe,
+            supervisorControlPlane.subscribeGoals(input),
+            { "rpc.aggregate": "supervisor" },
+          ),
+        [WS_METHODS.supervisorGoalsRead]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.supervisorGoalsRead,
+            supervisorControlPlane.readGoal(input.goalId),
+            { "rpc.aggregate": "supervisor" },
+          ),
+        [WS_METHODS.supervisorGoalsUpdate]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.supervisorGoalsUpdate,
+            supervisorControlPlane.updateGoal(input),
+            { "rpc.aggregate": "supervisor" },
+          ),
+        [WS_METHODS.supervisorGoalsCancel]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.supervisorGoalsCancel,
+            supervisorGoalCancellation.cancelGoal(input),
+            { "rpc.aggregate": "supervisor" },
+          ),
         [WS_METHODS.serverProbe]: (_input) =>
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {
             "rpc.aggregate": "server",

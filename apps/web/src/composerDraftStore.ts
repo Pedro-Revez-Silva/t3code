@@ -303,7 +303,7 @@ export type DraftThreadState = DraftSessionState;
 /**
  * Draft session metadata paired with its stable draft-session identity.
  */
-interface ProjectDraftSession extends DraftSessionState {
+export interface ProjectDraftSession extends DraftSessionState {
   draftId: DraftId;
 }
 

@@ -1298,6 +1298,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           case "provider-thread.updated": {
             const payloadJson = yield* encodeProviderThreadPayload(event.payload);
             const payload = parseEncodedPayload(payloadJson);
+            if (event.payload.driver === "opencode" && event.payload.nativeThreadRef !== null) {
+              yield* sql`
+                DELETE FROM orchestration_v2_projection_provider_threads
+                WHERE provider_thread_id <> ${event.payload.id}
+                  AND thread_id = ${event.payload.appThreadId}
+                  AND driver = ${event.payload.driver}
+                  AND provider_instance_id = ${event.payload.providerInstanceId}
+                  AND provider_session_id = ${event.payload.providerSessionId}
+                  AND json_extract(payload_json, '$.nativeThreadRef') IS NULL
+              `;
+            }
             yield* sql`
               INSERT INTO orchestration_v2_projection_provider_threads (
                 provider_thread_id,

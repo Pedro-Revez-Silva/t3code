@@ -38,6 +38,70 @@ const providerInstanceId = modelSelection.instanceId;
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 it.layer(TestLayer)("ProjectionStoreV2", (it) => {
+  it.effect("atomically replaces a provisional OpenCode provider thread with native identity", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:projection-opencode-canonicalization");
+      const sessionId = ProviderSessionId.make("provider-session:projection-opencode");
+      const instanceId = ProviderInstanceId.make("opencode");
+      const openCodeDriver = ProviderDriverKind.make("opencode");
+      const provisionalId = ProviderThreadId.make("provider-thread:pending:opencode");
+      const canonicalId = ProviderThreadId.make("provider-thread:opencode:ses_native");
+      const providerThread = {
+        id: provisionalId,
+        driver: openCodeDriver,
+        providerInstanceId: instanceId,
+        providerSessionId: sessionId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "active" as const,
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-opencode-provisional"),
+        type: "provider-thread.updated",
+        threadId,
+        driver: openCodeDriver,
+        providerInstanceId: instanceId,
+        occurredAt: now,
+        payload: providerThread,
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-opencode-canonical"),
+        type: "provider-thread.updated",
+        threadId,
+        driver: openCodeDriver,
+        providerInstanceId: instanceId,
+        occurredAt: now,
+        payload: {
+          ...providerThread,
+          id: canonicalId,
+          nativeThreadRef: {
+            driver: openCodeDriver,
+            nativeId: "ses_native",
+            strength: "strong",
+          },
+        },
+      });
+      const rows = yield* sql<{ readonly provider_thread_id: string }>`
+        SELECT provider_thread_id
+        FROM orchestration_v2_projection_provider_threads
+        WHERE thread_id = ${threadId}
+        ORDER BY provider_thread_id
+      `;
+      assert.deepStrictEqual(rows, [{ provider_thread_id: canonicalId }]);
+    }),
+  );
+
   it.effect("projects one shared provider session into multiple thread bindings", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStoreV2;

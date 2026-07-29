@@ -173,6 +173,7 @@ describe("orchestration V2 contracts", () => {
       parentNodeId: "node-parent-1",
       task: "Inspect the API boundary.",
       title: "API inspection",
+      targetProjectId: "project-child-1",
       modelSelection: {
         instanceId: "claudeAgent",
         model: "claude-sonnet-4-6",
@@ -188,10 +189,11 @@ describe("orchestration V2 contracts", () => {
     expect(command.parentThreadId).toBe(ThreadId.make("thread-parent-1"));
     expect(command.parentRunId).toBe(RunId.make("run-parent-1"));
     expect(command.parentNodeId).toBe(NodeId.make("node-parent-1"));
+    expect(command.targetProjectId).toBe(ProjectId.make("project-child-1"));
   });
 
   it("decodes durable created-thread timeline records", () => {
-    const command = decodeOrchestrationV2Command({
+    const legacyCommand = decodeOrchestrationV2Command({
       type: "thread.created.record",
       commandId: "command-thread-record-1",
       parentThreadId: "thread-parent-1",
@@ -200,7 +202,7 @@ describe("orchestration V2 contracts", () => {
       targetThreadId: "thread-child-1",
       targetRunId: "run-child-1",
     });
-    const item = decodeOrchestrationV2TurnItem({
+    const legacyItem = decodeOrchestrationV2TurnItem({
       id: "turn-item-thread-created-1",
       type: "thread_created",
       threadId: "thread-parent-1",
@@ -222,16 +224,16 @@ describe("orchestration V2 contracts", () => {
       updatedAt: now,
     });
 
-    expect(command.type).toBe("thread.created.record");
-    if (command.type !== "thread.created.record") {
+    expect(legacyCommand.type).toBe("thread.created.record");
+    if (legacyCommand.type !== "thread.created.record") {
       throw new Error("expected thread.created.record");
     }
-    expect(command.targetThreadId).toBe(ThreadId.make("thread-child-1"));
-    expect(item.type).toBe("thread_created");
-    if (item.type !== "thread_created") {
+    expect(legacyItem.type).toBe("thread_created");
+    if (legacyItem.type !== "thread_created") {
       throw new Error("expected thread_created");
     }
-    expect(item.targetRunId).toBe(RunId.make("run-child-1"));
+    expect(legacyCommand.targetThreadId).toBe(ThreadId.make("thread-child-1"));
+    expect(legacyItem.targetRunId).toBe(RunId.make("run-child-1"));
   });
 
   it("decodes provider-neutral replay transcripts", () => {

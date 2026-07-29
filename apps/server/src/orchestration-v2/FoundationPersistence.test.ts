@@ -11,6 +11,7 @@ import {
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   ProjectId,
   ProviderDriverKind,
@@ -19,6 +20,7 @@ import {
   ProviderThreadId,
   RunAttemptId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -45,12 +47,19 @@ import {
 import { EventSinkV2, layer as eventSinkLayer } from "./EventSink.ts";
 import { EventStoreV2, layer as eventStoreLayer } from "./EventStore.ts";
 import { layer as idAllocatorLayer } from "./IdAllocator.ts";
+import { OrchestratorV2 } from "./Orchestrator.ts";
 import {
   ProjectionMaintenanceV2,
   layer as projectionMaintenanceLayer,
 } from "./ProjectionMaintenance.ts";
 import { ProjectionStoreV2, layer as projectionStoreLayer } from "./ProjectionStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import { ProviderTurnControlServiceV2 } from "./ProviderTurnControlService.ts";
+import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
+import {
+  layer as providerSessionGenerationStoreLayer,
+  ProviderSessionGenerationStore,
+} from "./ProviderSessionGenerationStore.ts";
 
 const databaseLayer = SqlitePersistenceMemory;
 const eventStoreProvided = eventStoreLayer.pipe(Layer.provideMerge(databaseLayer));
@@ -59,6 +68,9 @@ const storesProvided = Layer.mergeAll(databaseLayer, eventStoreProvided, project
 const eventSinkProvided = eventSinkLayer.pipe(Layer.provide(storesProvided));
 const effectOutboxProvided = effectOutboxLayer.pipe(Layer.provide(databaseLayer));
 const commandReceiptStoreProvided = commandReceiptStoreLayer.pipe(Layer.provide(databaseLayer));
+const providerSessionGenerationStoreProvided = providerSessionGenerationStoreLayer.pipe(
+  Layer.provide(databaseLayer),
+);
 const projectionMaintenanceProvided = projectionMaintenanceLayer.pipe(
   Layer.provide(storesProvided),
 );
@@ -69,6 +81,7 @@ const TestLayer = Layer.mergeAll(
   commandReceiptStoreProvided,
   idAllocatorLayer,
   projectionMaintenanceProvided,
+  providerSessionGenerationStoreProvided,
 );
 
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -123,6 +136,183 @@ function threadCreatedEvent(input: {
 }
 
 it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
+  it.effect("fences command commits by live supervisor runtime authority", () =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSinkV2;
+      const generations = yield* ProviderSessionGenerationStore;
+      const commandReceipts = yield* CommandReceiptStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const supervisorThreadId = ThreadId.make("thread:foundation-authority");
+      const targetThreadId = ThreadId.make("thread:foundation-authority-target");
+      const runtimeProviderSessionId = ProviderSessionId.make(
+        "provider-session:foundation-authority",
+      );
+      yield* sql`
+        INSERT INTO supervisor_designation(singleton_id, thread_id, revision, created_at, updated_at)
+        VALUES (1, ${supervisorThreadId}, 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+      `;
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_provider_threads (
+          provider_thread_id, thread_id, owner_node_id, provider, driver,
+          provider_instance_id, provider_session_id, status, first_run_ordinal,
+          last_run_ordinal, updated_at, payload_json
+        ) VALUES (
+          'provider-thread:foundation-authority', ${supervisorThreadId}, NULL,
+          ${providerInstanceId}, ${providerDriver}, ${providerInstanceId},
+          ${runtimeProviderSessionId}, 'active', 1, 1, '2026-01-01T00:00:00.000Z', '{}'
+        )
+      `;
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_runs (
+          run_id, thread_id, ordinal, provider, provider_instance_id,
+          provider_thread_id, status, requested_at, completed_at, payload_json
+        ) VALUES (
+          'run:foundation-authority', ${supervisorThreadId}, 1, ${providerInstanceId},
+          ${providerInstanceId}, 'provider-thread:foundation-authority', 'running',
+          '2026-01-01T00:00:00.000Z', NULL, '{}'
+        )
+      `;
+      const commandId = CommandId.make("command:foundation-authority");
+      const commit = eventSink.commitCommand({
+        commandId,
+        threadId: targetThreadId,
+        commandType: "thread.create",
+        acceptedAt: now,
+        events: [
+          threadCreatedEvent({
+            id: "event:foundation-authority-target",
+            thread: makeThread(targetThreadId, now),
+            now,
+          }),
+        ],
+        effects: [],
+        supervisorAuthorityGuard: {
+          threadId: supervisorThreadId,
+          runtimeProviderSessionId,
+          providerInstanceId,
+        },
+      });
+
+      yield* sql`
+        UPDATE supervisor_designation
+        SET thread_id = 'thread:foundation-authority-replacement', revision = 2
+        WHERE singleton_id = 1
+      `;
+      const failure = yield* Effect.flip(commit);
+      assert.equal(failure._tag, "EventSinkWriteError");
+      const rejectedCommandId = CommandId.make("command:foundation-authority-rejected");
+      const rejectedFailure = yield* eventSink
+        .commitRejectedCommand({
+          commandId: rejectedCommandId,
+          threadId: targetThreadId,
+          commandType: "thread.create",
+          rejectedAt: now,
+          error: "planned rejection after takeover",
+          runtimeAuthorityGuard: {
+            threadId: supervisorThreadId,
+            runtimeProviderSessionId,
+            providerInstanceId,
+          },
+          supervisorAuthorityGuard: {
+            threadId: supervisorThreadId,
+            runtimeProviderSessionId,
+            providerInstanceId,
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(rejectedFailure._tag, "EventSinkWriteError");
+      const receipts = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count
+        FROM orchestration_v2_command_receipts
+        WHERE command_id IN (${commandId}, ${rejectedCommandId})
+      `;
+      assert.equal(receipts[0]?.count, 0);
+
+      yield* sql`
+        UPDATE supervisor_designation
+        SET thread_id = ${supervisorThreadId}, revision = 3
+        WHERE singleton_id = 1
+      `;
+      const accepted = yield* commit;
+      assert.isTrue(accepted.committed);
+
+      yield* generations.quarantine({
+        threadId: supervisorThreadId,
+        providerInstanceId,
+        providerSessionId: runtimeProviderSessionId,
+        reason: "runtime ownership was quarantined",
+      });
+      const staleRuntimeCommandId = CommandId.make(
+        "command:foundation-authority:stale-runtime-generation",
+      );
+      const staleRuntimeFailure = yield* eventSink
+        .commitRejectedCommand({
+          commandId: staleRuntimeCommandId,
+          threadId: targetThreadId,
+          commandType: "thread.create",
+          rejectedAt: now,
+          error: "stale runtime generation",
+          runtimeAuthorityGuard: {
+            threadId: supervisorThreadId,
+            runtimeProviderSessionId,
+            providerInstanceId,
+            runtimeGeneration: 0,
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(staleRuntimeFailure._tag, "EventSinkWriteError");
+
+      const staleSupervisorCommandId = CommandId.make(
+        "command:foundation-authority:stale-supervisor-generation",
+      );
+      const staleSupervisorFailure = yield* eventSink
+        .commitRejectedCommand({
+          commandId: staleSupervisorCommandId,
+          threadId: targetThreadId,
+          commandType: "thread.create",
+          rejectedAt: now,
+          error: "stale supervisor generation",
+          supervisorAuthorityGuard: {
+            threadId: supervisorThreadId,
+            runtimeProviderSessionId,
+            providerInstanceId,
+            runtimeGeneration: 0,
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(staleSupervisorFailure._tag, "EventSinkWriteError");
+
+      const currentGenerationCommandId = CommandId.make(
+        "command:foundation-authority:current-generation",
+      );
+      yield* eventSink.commitRejectedCommand({
+        commandId: currentGenerationCommandId,
+        threadId: targetThreadId,
+        commandType: "thread.create",
+        rejectedAt: now,
+        error: "current authority generation",
+        runtimeAuthorityGuard: {
+          threadId: supervisorThreadId,
+          runtimeProviderSessionId,
+          providerInstanceId,
+          runtimeGeneration: 1,
+        },
+        supervisorAuthorityGuard: {
+          threadId: supervisorThreadId,
+          runtimeProviderSessionId,
+          providerInstanceId,
+          runtimeGeneration: 1,
+        },
+      });
+      assert.isTrue(Option.isNone(yield* commandReceipts.getByCommandId(staleRuntimeCommandId)));
+      assert.isTrue(Option.isNone(yield* commandReceipts.getByCommandId(staleSupervisorCommandId)));
+      assert.isTrue(
+        Option.isSome(yield* commandReceipts.getByCommandId(currentGenerationCommandId)),
+      );
+    }),
+  );
+
   it.effect("paginates catch-up beyond the event-store read limit", () =>
     Effect.gen(function* () {
       const eventSink = yield* EventSinkV2;
@@ -205,6 +395,12 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       const firstThreadId = ThreadId.make("thread:foundation-shared-session:first");
       const secondThreadId = ThreadId.make("thread:foundation-shared-session:second");
       const providerSessionId = ProviderSessionId.make("provider-session:foundation:shared");
+      const firstProviderThreadId = ProviderThreadId.make(
+        "provider-thread:foundation-shared-session:first",
+      );
+      const secondProviderThreadId = ProviderThreadId.make(
+        "provider-thread:foundation-shared-session:second",
+      );
       const firstSession = {
         id: providerSessionId,
         driver: providerDriver,
@@ -218,6 +414,28 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
         lastError: null,
       };
       const secondSession = { ...firstSession, cwd: "/workspace/second" };
+      const makeProviderThread = (
+        threadId: ThreadId,
+        id: ProviderThreadId,
+      ): OrchestrationV2ProviderThread => ({
+        id,
+        driver: providerDriver,
+        providerInstanceId,
+        providerSessionId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "idle",
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const firstProviderThread = makeProviderThread(firstThreadId, firstProviderThreadId);
+      const secondProviderThread = makeProviderThread(secondThreadId, secondProviderThreadId);
 
       yield* eventSink.write({
         events: [
@@ -226,6 +444,15 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
             thread: makeThread(firstThreadId, now),
             now,
           }),
+          {
+            id: EventId.make("event:foundation-shared-session:first-provider-thread"),
+            type: "provider-thread.updated",
+            threadId: firstThreadId,
+            driver: providerDriver,
+            providerInstanceId,
+            occurredAt: now,
+            payload: firstProviderThread,
+          },
           {
             id: EventId.make("event:foundation-shared-session:first-attachment"),
             type: "provider-session.attached",
@@ -240,6 +467,15 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
             thread: makeThread(secondThreadId, now),
             now,
           }),
+          {
+            id: EventId.make("event:foundation-shared-session:second-provider-thread"),
+            type: "provider-thread.updated",
+            threadId: secondThreadId,
+            driver: providerDriver,
+            providerInstanceId,
+            occurredAt: now,
+            payload: secondProviderThread,
+          },
           {
             id: EventId.make("event:foundation-shared-session:second-attachment"),
             type: "provider-session.attached",
@@ -258,6 +494,57 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       );
       assert.isTrue((yield* maintenance.verify).valid);
       assert.isTrue((yield* maintenance.rebuild).valid);
+
+      const detail = "shared owner did not confirm provider termination";
+      const quarantine = yield* eventSink.quarantineProviderSession({
+        threadId: firstThreadId,
+        providerInstanceId,
+        providerSessionId,
+        reason: detail,
+        providerThreadEvent: {
+          id: EventId.make("event:foundation-shared-session:first-provider-thread-detached"),
+          type: "provider-thread.updated",
+          threadId: firstThreadId,
+          driver: providerDriver,
+          providerInstanceId,
+          occurredAt: now,
+          payload: {
+            ...firstProviderThread,
+            providerSessionId: null,
+            status: "not_loaded",
+          },
+        },
+        providerSessionErrorEvent: {
+          id: EventId.make("event:foundation-shared-session:error"),
+          type: "provider-session.updated",
+          threadId: firstThreadId,
+          driver: providerDriver,
+          providerInstanceId,
+          occurredAt: now,
+          payload: { ...firstSession, status: "error", lastError: detail },
+        },
+        providerSessionDetachedEvent: {
+          id: EventId.make("event:foundation-shared-session:first-detached"),
+          type: "provider-session.detached",
+          threadId: firstThreadId,
+          driver: providerDriver,
+          providerInstanceId,
+          occurredAt: now,
+          payload: { providerSessionId, detachedAt: now, reason: detail },
+        },
+      });
+      assert.isTrue(quarantine.committed);
+      assert.isFalse(quarantine.finalOwner);
+      assert.deepEqual(
+        quarantine.storedEvents.map((stored) => stored.event.type),
+        ["provider-thread.updated", "provider-session.detached"],
+      );
+      const firstProjection = yield* projectionStore.getThreadProjection(firstThreadId);
+      const secondProjection = yield* projectionStore.getThreadProjection(secondThreadId);
+      assert.equal(firstProjection.providerThreads[0]?.providerSessionId, null);
+      assert.deepEqual(firstProjection.providerSessions, []);
+      assert.equal(secondProjection.providerThreads[0]?.providerSessionId, providerSessionId);
+      assert.equal(secondProjection.providerSessions[0]?.status, "ready");
     }),
   );
 
@@ -506,6 +793,118 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
         WHERE thread_id = ${threadId}
       `;
         assert.equal(checkpointRows[0]?.count, 0);
+      }),
+  );
+
+  it.effect(
+    "atomically rejects delegated children for missing, deleted, or blank-root target projects",
+    () =>
+      Effect.gen(function* () {
+        const eventSink = yield* EventSinkV2;
+        const eventStore = yield* EventStoreV2;
+        const receipts = yield* CommandReceiptStoreV2;
+        const outbox = yield* EffectOutboxV2;
+        const sql = yield* SqlClient.SqlClient;
+        const now = yield* DateTime.now;
+        const deletedProjectId = ProjectId.make("project:delegated-target-deleted");
+        const blankRootProjectId = ProjectId.make("project:delegated-target-blank-root");
+
+        yield* sql`
+          INSERT INTO projection_projects (
+            project_id,
+            title,
+            workspace_root,
+            default_model_selection_json,
+            scripts_json,
+            created_at,
+            updated_at,
+            deleted_at
+          ) VALUES
+            (
+              ${deletedProjectId},
+              'Deleted delegated target',
+              '/deleted-target',
+              NULL,
+              '[]',
+              '2026-01-01T00:00:00.000Z',
+              '2026-01-01T00:00:00.000Z',
+              '2026-01-02T00:00:00.000Z'
+            ),
+            (
+              ${blankRootProjectId},
+              'Blank-root delegated target',
+              '   ',
+              NULL,
+              '[]',
+              '2026-01-01T00:00:00.000Z',
+              '2026-01-01T00:00:00.000Z',
+              NULL
+            )
+        `;
+
+        const cases = [
+          {
+            name: "missing",
+            projectId: ProjectId.make("project:delegated-target-missing"),
+          },
+          { name: "deleted", projectId: deletedProjectId },
+          { name: "blank-root", projectId: blankRootProjectId },
+        ];
+
+        for (const target of cases) {
+          const commandId = CommandId.make(`command:delegated-target-${target.name}`);
+          const childThreadId = ThreadId.make(`thread:delegated-target-${target.name}`);
+          const childThread = {
+            ...makeThread(childThreadId, now),
+            projectId: target.projectId,
+          };
+          const effectId = `effect:delegated-target-${target.name}`;
+
+          const exit = yield* Effect.exit(
+            eventSink.commitCommand({
+              commandId,
+              threadId: ThreadId.make("thread:delegated-parent"),
+              commandType: "delegated_task.request",
+              acceptedAt: now,
+              events: [
+                threadCreatedEvent({
+                  id: `event:delegated-target-${target.name}`,
+                  thread: childThread,
+                  now,
+                }),
+              ],
+              effects: [
+                {
+                  id: effectId,
+                  commandId,
+                  threadId: childThreadId,
+                  request: {
+                    type: "provider-turn.start",
+                    runId: RunId.make(`run:delegated-target-${target.name}`),
+                  },
+                },
+              ],
+              activeProjectGuard: { projectId: target.projectId },
+            }),
+          );
+
+          assert.equal(exit._tag, "Failure");
+          assert.isTrue(Option.isNone(yield* receipts.getByCommandId(commandId)));
+          assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+          assert.deepEqual(
+            yield* eventStore.readByCommandId({ commandId }).pipe(
+              Stream.runCollect,
+              Effect.map((events) => Array.from(events)),
+            ),
+            [],
+          );
+          const childRows = yield* sql<{ readonly count: number }>`
+            SELECT COUNT(*) AS count
+            FROM orchestration_v2_projection_threads
+            WHERE thread_id = ${childThreadId}
+          `;
+          assert.equal(childRows[0]?.count, 0);
+        }
       }),
   );
 
@@ -1159,6 +1558,26 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
 
       const recovery = yield* ProviderRuntimeRecovery.make.pipe(
         Effect.provideService(
+          ProviderTurnControlServiceV2,
+          ProviderTurnControlServiceV2.of({
+            interrupt: () => Effect.void,
+            interruptAndAwaitTerminal: () => Effect.void,
+            hardStop: () => Effect.void,
+            steer: () => Effect.void,
+          }),
+        ),
+        Effect.provide(
+          Layer.mock(ProviderSessionManagerV2)({
+            release: () => Effect.void,
+          }),
+        ),
+        Effect.provideService(
+          OrchestratorV2,
+          OrchestratorV2.of({
+            reconcileDelegatedTasks: Effect.succeed(0),
+          } as unknown as OrchestratorV2["Service"]),
+        ),
+        Effect.provideService(
           OrchestrationEffectWorkerV2,
           OrchestrationEffectWorkerV2.of({
             awaitWork: Effect.void,
@@ -1171,7 +1590,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       assert.equal(first.terminalizedRuns, 1);
       assert.equal(first.retiredEffects, 1);
       const projection = yield* projectionStore.getThreadProjection(threadId);
-      assert.equal(projection.runs[0]?.status, "cancelled");
+      assert.equal(projection.runs[0]?.status, "interrupted");
       const effect = yield* outbox.get("effect:foundation-process-loss");
       assert.isTrue(Option.isSome(effect));
       if (Option.isSome(effect)) assert.equal(effect.value.status, "cancelled");
@@ -1179,6 +1598,338 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       const second = yield* recovery.recover;
       assert.equal(second.terminalizedRuns, 0);
       assert.equal(second.retiredEffects, 0);
+    }),
+  );
+
+  it.effect("atomically fails one leased response effect with its release events", () =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSinkV2;
+      const outbox = yield* EffectOutboxV2;
+      const projections = yield* ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:foundation-response-terminalization");
+      const commandId = CommandId.make("command:foundation-response-terminalization");
+      const effectId = "effect:foundation-response-terminalization";
+      const workerId = "worker:foundation-response-terminalization";
+      const thread = makeThread(threadId, now);
+      const initialRunId = RunId.make("run:foundation-response-terminalization:initial");
+      const created = threadCreatedEvent({
+        id: "event:foundation-response-terminalization:create",
+        thread,
+        now,
+      });
+      yield* eventSink.commitCommand({
+        commandId,
+        threadId,
+        commandType: "runtime-request.respond",
+        acceptedAt: now,
+        events: [
+          created,
+          {
+            id: EventId.make("event:foundation-response-terminalization:initial-run"),
+            type: "run.created",
+            threadId,
+            runId: initialRunId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: {
+              id: initialRunId,
+              threadId,
+              ordinal: 1,
+              providerInstanceId,
+              modelSelection,
+              providerThreadId: null,
+              userMessageId: MessageId.make("message:foundation-response-terminalization:initial"),
+              rootNodeId: null,
+              activeAttemptId: null,
+              status: "completed",
+              queuePosition: null,
+              requestedAt: now,
+              startedAt: now,
+              completedAt: now,
+              checkpointId: null,
+              contextHandoffId: null,
+            },
+          },
+        ],
+        effects: [
+          {
+            id: effectId,
+            commandId,
+            threadId,
+            request: {
+              type: "runtime-request.respond",
+              providerSessionId: ProviderSessionId.make(
+                "provider-session:foundation-response-terminalization",
+              ),
+              requestId: RuntimeRequestId.make("request:foundation-response-terminalization"),
+              decision: "accept",
+            },
+          },
+        ],
+      });
+      yield* sql`
+        UPDATE orchestration_v2_effect_outbox
+        SET status = 'running', attempt_count = attempt_count + 1,
+          lease_owner = ${workerId}, lease_expires_at = '9999-01-01T00:00:00.000Z'
+        WHERE effect_id = ${effectId}
+      `;
+
+      const failedTransaction = yield* Effect.exit(
+        eventSink.failEffectWithEvents({
+          effectId,
+          workerId,
+          error: "provider delivery failed",
+          commandId: CommandId.make(`${commandId}:delivery-failed`),
+          events: [
+            {
+              id: EventId.make("event:foundation-response-terminalization:conflicting-run"),
+              type: "run.created",
+              threadId,
+              runId: RunId.make("run:foundation-response-terminalization:conflict"),
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: RunId.make("run:foundation-response-terminalization:conflict"),
+                threadId,
+                ordinal: 1,
+                providerInstanceId,
+                modelSelection,
+                providerThreadId: null,
+                userMessageId: MessageId.make(
+                  "message:foundation-response-terminalization:conflict",
+                ),
+                rootNodeId: null,
+                activeAttemptId: null,
+                status: "completed",
+                queuePosition: null,
+                requestedAt: now,
+                startedAt: now,
+                completedAt: now,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
+            },
+          ],
+        }),
+      );
+      assert.equal(failedTransaction._tag, "Failure");
+      const stillRunning = yield* outbox.get(effectId);
+      assert.isTrue(Option.isSome(stillRunning));
+      if (Option.isSome(stillRunning)) assert.equal(stillRunning.value.status, "running");
+
+      const updatedThread = { ...thread, title: "Reservation released", updatedAt: now };
+      const terminalized = yield* eventSink.failEffectWithEvents({
+        effectId,
+        workerId,
+        error: "provider delivery failed",
+        commandId: CommandId.make(`${commandId}:delivery-failed`),
+        events: [
+          {
+            id: EventId.make("event:foundation-response-terminalization:released"),
+            type: "thread.metadata-updated",
+            threadId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: updatedThread,
+          },
+        ],
+      });
+      assert.isTrue(terminalized.failed);
+      const terminalEffect = yield* outbox.get(effectId);
+      assert.isTrue(Option.isSome(terminalEffect));
+      if (Option.isSome(terminalEffect)) assert.equal(terminalEffect.value.status, "failed");
+      assert.equal(
+        (yield* projections.getThreadProjection(threadId)).thread.title,
+        updatedThread.title,
+      );
+
+      yield* outbox.enqueue([
+        {
+          id: `${effectId}:replacement`,
+          commandId: CommandId.make(`${commandId}:replacement`),
+          threadId,
+          request: { type: "terminal.cleanup" },
+        },
+      ]);
+      let claimedReplacement = false;
+      for (let index = 0; index < 20; index += 1) {
+        const claimed = yield* outbox.claimNext({
+          workerId: `${workerId}:replacement:${index}`,
+          leaseDurationMs: 30_000,
+        });
+        if (Option.isNone(claimed)) break;
+        if (claimed.value.id === `${effectId}:replacement`) {
+          claimedReplacement = true;
+          break;
+        }
+      }
+      assert.isTrue(claimedReplacement);
+    }),
+  );
+
+  it.effect("atomically orders runtime response completion against terminalization", () =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSinkV2;
+      const projections = yield* ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:foundation-runtime-request-guard");
+      const responseLosesId = RuntimeRequestId.make("request:foundation-response-loses");
+      const responseWinsId = RuntimeRequestId.make("request:foundation-response-wins");
+      const responseLosesCommandId = CommandId.make("command:foundation-response-loses");
+      const responseWinsCommandId = CommandId.make("command:foundation-response-wins");
+      const responseLosesNodeId = NodeId.make("node:foundation-response-loses");
+      const responseWinsNodeId = NodeId.make("node:foundation-response-wins");
+      const pendingRequest = (input: {
+        readonly id: RuntimeRequestId;
+        readonly nodeId: NodeId;
+        readonly responseCommandId: CommandId;
+      }) => ({
+        id: input.id,
+        nodeId: input.nodeId,
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "command" as const,
+        status: "pending" as const,
+        responseCommandId: input.responseCommandId,
+        responseAttempt: 1,
+        responseCapability: {
+          type: "live" as const,
+          providerSessionId: ProviderSessionId.make("provider-session:foundation-request-guard"),
+        },
+        createdAt: now,
+        resolvedAt: null,
+      });
+      const responseLoses = pendingRequest({
+        id: responseLosesId,
+        nodeId: responseLosesNodeId,
+        responseCommandId: responseLosesCommandId,
+      });
+      const responseWins = pendingRequest({
+        id: responseWinsId,
+        nodeId: responseWinsNodeId,
+        responseCommandId: responseWinsCommandId,
+      });
+      yield* eventSink.write({
+        events: [
+          threadCreatedEvent({
+            id: "event:foundation-runtime-request-guard:thread",
+            thread: makeThread(threadId, now),
+            now,
+          }),
+          {
+            id: EventId.make("event:foundation-runtime-request-guard:loses-pending"),
+            type: "runtime-request.updated",
+            threadId,
+            nodeId: responseLosesNodeId,
+            occurredAt: now,
+            payload: responseLoses,
+          },
+          {
+            id: EventId.make("event:foundation-runtime-request-guard:wins-pending"),
+            type: "runtime-request.updated",
+            threadId,
+            nodeId: responseWinsNodeId,
+            occurredAt: now,
+            payload: responseWins,
+          },
+        ],
+      });
+
+      const terminalFirst = yield* eventSink.writeIfRuntimeRequestsCurrent({
+        events: [
+          {
+            id: EventId.make("event:foundation-runtime-request-guard:terminal-first"),
+            type: "runtime-request.updated",
+            threadId,
+            nodeId: responseLosesNodeId,
+            occurredAt: now,
+            payload: {
+              ...responseLoses,
+              status: "cancelled",
+              responseCapability: { type: "not_resumable", reason: "Cancelled first." },
+              resolvedAt: now,
+            },
+          },
+        ],
+        guards: [{ threadId, requestId: responseLosesId, expectedStatus: "pending" }],
+      });
+      const staleResponse = yield* eventSink.writeIfRuntimeRequestsCurrent({
+        commandId: CommandId.make(`${responseLosesCommandId}:delivered`),
+        events: [
+          {
+            id: EventId.make("event:foundation-runtime-request-guard:stale-response"),
+            type: "runtime-request.updated",
+            threadId,
+            nodeId: responseLosesNodeId,
+            occurredAt: now,
+            payload: { ...responseLoses, status: "resolved", resolvedAt: now },
+          },
+        ],
+        guards: [
+          {
+            threadId,
+            requestId: responseLosesId,
+            expectedStatus: "pending",
+            expectedResponseCommandId: responseLosesCommandId,
+          },
+        ],
+      });
+
+      const responseFirst = yield* eventSink.writeIfRuntimeRequestsCurrent({
+        commandId: CommandId.make(`${responseWinsCommandId}:delivered`),
+        events: [
+          {
+            id: EventId.make("event:foundation-runtime-request-guard:response-first"),
+            type: "runtime-request.updated",
+            threadId,
+            nodeId: responseWinsNodeId,
+            occurredAt: now,
+            payload: { ...responseWins, status: "resolved", resolvedAt: now },
+          },
+        ],
+        guards: [
+          {
+            threadId,
+            requestId: responseWinsId,
+            expectedStatus: "pending",
+            expectedResponseCommandId: responseWinsCommandId,
+          },
+        ],
+      });
+      const staleTerminalization = yield* eventSink.writeIfRuntimeRequestsCurrent({
+        events: [
+          {
+            id: EventId.make("event:foundation-runtime-request-guard:stale-terminalization"),
+            type: "runtime-request.updated",
+            threadId,
+            nodeId: responseWinsNodeId,
+            occurredAt: now,
+            payload: {
+              ...responseWins,
+              status: "expired",
+              responseCapability: { type: "not_resumable", reason: "Expired too late." },
+              resolvedAt: now,
+            },
+          },
+        ],
+        guards: [{ threadId, requestId: responseWinsId, expectedStatus: "pending" }],
+      });
+
+      assert.isTrue(terminalFirst.committed);
+      assert.isFalse(staleResponse.committed);
+      assert.isTrue(responseFirst.committed);
+      assert.isFalse(staleTerminalization.committed);
+      const projection = yield* projections.getThreadProjection(threadId);
+      assert.equal(
+        projection.runtimeRequests.find((request) => request.id === responseLosesId)?.status,
+        "cancelled",
+      );
+      assert.equal(
+        projection.runtimeRequests.find((request) => request.id === responseWinsId)?.status,
+        "resolved",
+      );
     }),
   );
 

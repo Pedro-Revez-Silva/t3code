@@ -33,7 +33,7 @@ import * as Stream from "effect/Stream";
 
 import { ServerSettingsService } from "../serverSettings.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
-import { EventSinkV2 } from "./EventSink.ts";
+import { EventSinkV2, type ProviderEventCommitAuthority } from "./EventSink.ts";
 import {
   IdAllocatorV2,
   type IdAllocatorV2AllocationError,
@@ -310,6 +310,10 @@ export function routeProviderEvent(
     ownedProviderTurnIds: new Set([...state.ownedProviderTurnIds, providerTurnId]),
     rootProviderTurnId: root ? providerTurnId : state.rootProviderTurnId,
   });
+  const addThread = (threadId: ThreadId, next: ProviderEventRoutingState) => ({
+    ...next,
+    ownedThreadIds: new Set([...next.ownedThreadIds, threadId]),
+  });
 
   switch (event.type) {
     case "provider_session.updated":
@@ -341,6 +345,19 @@ export function routeProviderEvent(
         (event.providerThread.appThreadId !== null && ownsThread(event.providerThread.appThreadId));
       return belongs ? [true, addProviderThread(event.providerThread.id)] : [false, state];
     }
+    case "provider_thread.resume_requested":
+      return [
+        event.parentProviderThreadId === input.providerThreadId &&
+          event.parentProviderTurnId === state.rootProviderTurnId,
+        state,
+      ];
+    case "provider_thread.resume_confirmed": {
+      const belongs =
+        event.parentProviderThreadId === input.providerThreadId &&
+        event.parentProviderTurnId === state.rootProviderTurnId;
+      if (!belongs) return [false, state];
+      return [true, addThread(event.childThreadId, addProviderThread(event.childProviderThreadId))];
+    }
     case "provider_turn.updated": {
       const isRoot = event.providerTurn.runAttemptId === input.attemptId;
       const belongs =
@@ -349,7 +366,11 @@ export function routeProviderEvent(
           state.ownedProviderThreadIds.has(event.providerTurn.providerThreadId)) ||
         state.ownedProviderTurnIds.has(event.providerTurn.id) ||
         (event.threadId !== undefined && ownsChildThread(event.threadId));
-      return belongs ? [true, addProviderTurn(event.providerTurn.id, isRoot)] : [false, state];
+      if (!belongs) return [false, state];
+      const next = addProviderTurn(event.providerTurn.id, isRoot);
+      return event.threadId !== undefined && event.threadId !== input.threadId
+        ? [true, addThread(event.threadId, next)]
+        : [true, next];
     }
     case "node.updated": {
       const belongs = ownsRun(event.node.runId) || ownsChildThread(event.node.threadId);
@@ -435,6 +456,7 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly message: ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
+  readonly providerGeneration?: number;
 }
 
 export interface RunExecutionServiceV2Shape {
@@ -497,11 +519,16 @@ export const layer: Layer.Layer<
       readonly shouldFinalizeRun?: () => Effect.Effect<boolean, never>;
       readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
       readonly openRunOwnedSubagents?: OpenRunOwnedSubagentProjection;
+      readonly providerAuthority: ProviderEventCommitAuthority;
       readonly terminal: ProviderTerminalEvent;
       readonly failureItemPersisted: boolean;
     }) =>
       Effect.gen(function* () {
         const completedAt = yield* DateTime.now;
+        const providerAuthority = {
+          ...input.providerAuthority,
+          terminalProviderTurnId: input.terminal.providerTurnId,
+        } satisfies ProviderEventCommitAuthority;
         const finalizedAttempt: OrchestrationV2RunAttempt | null = {
           ...input.attempt,
           status: input.terminal.status,
@@ -521,6 +548,7 @@ export const layer: Layer.Layer<
             if (hasUnpairedRequest) {
               yield* eventSink.writeWithEffects({
                 effects: [],
+                providerAuthority,
                 events: [
                   {
                     id: yield* idAllocator.allocate.event({ threadId: input.run.threadId }),
@@ -586,6 +614,7 @@ export const layer: Layer.Layer<
           `command:effect:checkpoint.capture:${input.run.id}`,
         );
         yield* eventSink.writeWithEffects({
+          providerAuthority,
           effects:
             input.terminal.status === "completed"
               ? [
@@ -779,6 +808,15 @@ export const layer: Layer.Layer<
             ReadonlySet<OrchestrationV2TurnItem["id"]>
           >(new Set());
           const openRunOwnedSubagents = yield* Ref.make(emptyOpenRunOwnedSubagentProjection());
+          const providerAuthority: ProviderEventCommitAuthority = {
+            threadId: input.run.threadId,
+            providerSessionId: input.providerSessionId,
+            providerInstanceId: input.run.providerInstanceId,
+            generation: input.providerGeneration ?? 0,
+            providerThreadId: input.providerThread.id,
+            runId: input.run.id,
+            activeAttemptId: input.attempt.id,
+          };
           const finalizeRootRun = (terminal: ProviderTerminalEvent) =>
             Effect.gen(function* () {
               if (yield* Ref.get(rootRunFinalized)) {
@@ -801,6 +839,7 @@ export const layer: Layer.Layer<
                       hasUnpairedRunInterruptRequest: input.hasUnpairedRunInterruptRequest,
                     }),
                 openRunOwnedSubagents: openSubagents,
+                providerAuthority,
                 terminal,
                 failureItemPersisted: terminal.status === "failed",
               }).pipe(
@@ -976,16 +1015,11 @@ export const layer: Layer.Layer<
                     runId: input.run.id,
                     nodeId: input.rootNode.id,
                     event,
-                    ...(event.type === "provider_thread.updated" &&
-                    event.providerThread.id === input.providerThread.id
-                      ? {
-                          writeIfRunCurrent: {
-                            runId: input.run.id,
-                            activeAttemptId: input.attempt.id,
-                            expectedStatus: "running" as const,
-                          },
-                        }
-                      : {}),
+                    providerAuthority: {
+                      providerThreadId: input.providerThread.id,
+                      runId: input.run.id,
+                      activeAttemptId: input.attempt.id,
+                    },
                   });
                   storedEventCount = storedEvents.length;
                 }
@@ -1055,6 +1089,7 @@ export const layer: Layer.Layer<
                                                 input.hasUnpairedRunInterruptRequest,
                                             }),
                                         openRunOwnedSubagents: openSubagents,
+                                        providerAuthority,
                                         terminal: makeFailedTerminalEvent(
                                           makeProviderFailure({
                                             cause: Cause.squash(cause),
@@ -1137,6 +1172,7 @@ export const layer: Layer.Layer<
                                       input.hasUnpairedRunInterruptRequest,
                                   }),
                               openRunOwnedSubagents: openSubagents,
+                              providerAuthority,
                               terminal: makeFailedTerminalEvent(
                                 makeProviderFailure({
                                   cause: Cause.squash(cause),

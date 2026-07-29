@@ -1,7 +1,11 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, describe } from "@effect/vitest";
+import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
@@ -12,7 +16,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { GitCommandError } from "@t3tools/contracts";
 import { ServerConfig } from "../config.ts";
-import { splitNullSeparatedGitStdoutPaths } from "./GitVcsDriverCore.ts";
+import { makeGitVcsDriverCore, splitNullSeparatedGitStdoutPaths } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 
 const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -686,6 +690,84 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         yield* driver.removeWorktree({ cwd, path: worktreePath });
         const fileSystem = yield* FileSystem.FileSystem;
         assert.equal(yield* fileSystem.exists(worktreePath), false);
+        assert.include(yield* driver.listLocalBranchNames(cwd), "feature/worktree");
+        yield* driver.deleteLocalBranch({ cwd, branch: "feature/worktree" });
+        assert.notInclude(yield* driver.listLocalBranchNames(cwd), "feature/worktree");
+      }),
+    );
+
+    it.effect("removes the worktree and branch when post-add configuration fails", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "config-fails");
+        const gitDir = yield* git(cwd, ["rev-parse", "--git-dir"]);
+        yield* fileSystem.writeFileString(
+          pathService.resolve(cwd, gitDir, "config.lock"),
+          "locked",
+        );
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        const exit = yield* driver
+          .createWorktree({
+            cwd,
+            path: worktreePath,
+            refName: initialBranch,
+            newRefName: "feature/config-fails",
+            baseRefName: initialBranch,
+          })
+          .pipe(Effect.exit);
+
+        assert.isTrue(Exit.isFailure(exit));
+        assert.isFalse(yield* fileSystem.exists(worktreePath));
+        assert.notInclude(yield* driver.listLocalBranchNames(cwd), "feature/config-fails");
+      }),
+    );
+
+    it.effect("removes the worktree and branch when interrupted after worktree add", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "interrupted");
+        const postAddEntered = yield* Deferred.make<void>();
+        const interruptibleLayer = Layer.effect(
+          GitVcsDriver.GitVcsDriver,
+          makeGitVcsDriverCore({
+            afterWorktreeAdd: () =>
+              Deferred.succeed(postAddEntered, undefined).pipe(Effect.andThen(Effect.never)),
+          }).pipe(Effect.map(GitVcsDriver.GitVcsDriver.of)),
+        ).pipe(Layer.provide(ServerConfigLayer), Layer.provideMerge(NodeServices.layer));
+
+        const fiber = yield* GitVcsDriver.GitVcsDriver.pipe(
+          Effect.flatMap((driver) =>
+            driver.createWorktree({
+              cwd,
+              path: worktreePath,
+              refName: initialBranch,
+              newRefName: "feature/interrupted-after-add",
+              baseRefName: initialBranch,
+            }),
+          ),
+          Effect.provide(interruptibleLayer),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(postAddEntered);
+        yield* Fiber.interrupt(fiber);
+        const exit = yield* Fiber.await(fiber);
+
+        assert.isTrue(Exit.isFailure(exit));
+        if (Exit.isFailure(exit)) assert.isTrue(Cause.hasInterruptsOnly(exit.cause));
+        assert.isFalse(yield* fileSystem.exists(worktreePath));
+        assert.notInclude(
+          yield* git(cwd, ["branch", "--format=%(refname:short)"]).pipe(
+            Effect.map((branches) => branches.split("\n")),
+          ),
+          "feature/interrupted-after-add",
+        );
       }),
     );
   });

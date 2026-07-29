@@ -45,13 +45,73 @@ Before `ProviderSessionManager` opens a new V2 provider session, it asks
 - the provider session.
 
 The credential grants `preview` and `orchestration` capabilities. Credentials
-expire after a maximum lifetime, expire when idle, and are revoked when the
-provider session is released. The raw token is not persisted in orchestration
-state.
+are process-local, are lost on server restart, and are revoked when the provider
+session or owning thread is torn down. They currently have no time-based expiry.
+The raw token is not persisted in orchestration state.
 
 The MCP HTTP server resolves the bearer token and supplies the resulting
 `McpInvocationScope` to tool handlers. Orchestration handlers additionally
 check the `orchestration` capability before reading or mutating state.
+
+### Experimental global supervisor
+
+`T3CODE_EXPERIMENTAL_GLOBAL_SUPERVISOR_THREAD_ID` is a one-time compatibility
+bootstrap: when no persisted designation exists, startup stores that ordinary
+T3 thread as the supervisor. After bootstrap, authenticated environment RPC is
+the only way to reassign the persisted designation. MCP tools cannot designate
+a supervisor. Setting the authenticated configuration RPC's `threadId` to
+`null` creates a revisioned disabled state. That differs from an uninitialized
+revision-0 database, and later process starts do not let the environment
+bootstrap overwrite it.
+
+While it has an active run owned by the credential's provider instance, the
+configured thread can call `t3_project_list`, then pass a returned `projectId`
+to `delegate_task`, `t3_thread_start`, `t3_thread_list`, `t3_thread_read`,
+`t3_thread_respond`, `t3_thread_send`, `t3_thread_wait`, or
+`t3_thread_interrupt`. Cross-project starts use the selected project's root
+workspace and normal setup workflow. They do not accept arbitrary workspace
+paths.
+
+This is an experimental single-environment capability. Every global operation
+reads the persisted designation and verifies the exact active provider runtime
+session. Reassignment takes effect immediately: credentials for the old thread
+lose new global calls without a restart. The capability advertised when an MCP
+credential is issued is only feature-discovery metadata, not authorization.
+
+The current supervisor can use `goal_create` to persist a complete, acyclic task
+DAG, `goal_list`/`goal_read` to inspect it, and `goal_task_start` for one ready
+task whose dependencies are complete. Task starts reserve deterministic durable
+attempts before calling the existing idempotent delegated-task path; retry the
+same start after a crash rather than calling `delegate_task` separately.
+`goal_cancel` closes the goal and requests cancellation of linked delegated work.
+Per-project execution profiles supply default model/runtime/interaction values,
+parallel limits, and bounded retries; explicit delegation settings still win and
+parent runtime/interaction privilege ceilings still apply.
+Terminal app-owned task events also reconcile linked goal attempts by durable
+node ID during supervisor wake processing. Completion, failure, cancellation,
+and interruption therefore update goal subscriptions without requiring a
+`goal_read`; replay is idempotent and does not repeatedly increment revisions.
+
+Configured supervisors use `delegate_task` with `projectId` for managed workers.
+One atomic `delegated_task.request` creates the parent task relationship, child
+thread, and child run. A foreign child belongs to the selected project and does
+not inherit the parent's branch or worktree, so runtime policy resolves the
+selected project's root.
+
+A pending runtime request in an app-owned delegated child or its durable
+terminal `subagent_result` transfer queues a server-authored internal message in
+the parent. Wake processing replays the stored V2 event stream before following
+live events. Each event receives bounded handler retries; stream failures
+resubscribe with backoff. Command and message IDs are derived from the durable
+task source, so full restart replay converges on the existing command receipt.
+An invalid event is logged and skipped after bounded retries so later work can
+continue.
+
+`t3_thread_start` remains available as a top-level conversation convenience,
+including across projects, but it creates no durable supervisor watch
+relationship and does not promise automatic wake-up. Wake messages do not
+bypass project authorization; follow-up foreign-project operations still
+require the active global supervisor scope.
 
 ## Provider Injection
 
@@ -140,7 +200,7 @@ selection model-visible without allowing a request that cannot run.
 
 ## Tool Surface
 
-The server exposes eleven orchestration tools.
+The server exposes the following orchestration tools.
 
 ### `orchestrator_capabilities`
 
@@ -162,6 +222,7 @@ prompt.
 
 ```ts
 type DelegateTaskInput = {
+  projectId?: string;
   task: string;
   target?: {
     providerInstanceId?: string;
@@ -180,7 +241,9 @@ type DelegateTaskInput = {
 
 Provider, model, runtime mode, and interaction mode inherit from the parent
 when omitted. Selecting a different provider without a model uses that
-provider's first advertised model.
+provider's first advertised model. A configured global supervisor may select a
+foreign project; the child then uses that project and a root workspace rather
+than inheriting the parent's branch or worktree.
 
 Delegation requires an active parent run owned by the MCP credential's
 provider session. The request becomes the V2 command
@@ -249,14 +312,23 @@ without a prompt remain idle.
 Creates one ordinary top-level thread and immediately dispatches its first
 prompt. It is the single-thread convenience form of `create_threads` and
 returns the created thread and run IDs. Use `clientRequestId` when a caller may
-retry the request.
+retry the request. The configured global supervisor can supply `projectId` to
+start the thread in another project.
+
+### `t3_project_list`
+
+Lists project IDs and titles for the configured global supervisor. Ordinary
+thread credentials receive `capability_denied`. A global credential whose
+caller thread no longer has an active run owned by that provider instance
+receives `parent_not_active`.
 
 ### `t3_thread_list`
 
-Lists durable thread shells in the calling thread's project, newest first.
+Lists durable thread shells in the calling thread's project, newest first. The
+configured global supervisor can select another project with `projectId`.
 Callers can filter by title, run status, and whether app-owned sub-agent threads
 are included. Results are bounded and offset-paginated. Deleted threads and
-threads from other projects are never exposed.
+threads outside the selected project are never exposed.
 
 ### `t3_thread_read`
 
@@ -336,21 +408,50 @@ idempotent.
 The result summary prefers the latest assistant content from the child run and
 falls back to a terminal-status message when no assistant text exists.
 
+Thread reads also return `pendingRequests`, a sanitized structured projection of
+durable runtime requests and their approval or user-input turn items. Entries
+include the request kind and status, associated run/node IDs, whether the request
+is currently respondable, a non-resumable reason where applicable, approval
+prompt/kind, and structured questions. Provider credentials and native session
+identifiers are not exposed.
+
+### `t3_thread_respond`
+
+Responds to a live pending request from `t3_thread_read.pendingRequests`.
+Approval requests require `decision`; user-input requests require structured
+`answers`. Supplying both, neither, or the wrong payload for the request kind is
+rejected. `clientRequestId` makes a retry idempotent. The configured global
+supervisor may supply `projectId` for a foreign project; ordinary credentials
+remain limited to their current project. Stale and non-resumable requests cannot
+be answered. The response status is `accepted_for_delivery`: V2 durably accepts
+the command and queues process-bound provider delivery, but this result does not
+claim provider acknowledgement or outbox success. The request, node, and turn
+item remain nonterminal until the provider accepts the response. A terminal
+delivery failure releases the request and advances its durable delivery
+generation; retry with the same `clientRequestId` to enqueue that new attempt.
+Retries while an attempt is still reserved remain idempotent with the in-flight
+command. Process loss expires the request rather than falsely marking it
+resolved, although provider delivery can still be unknown if the process ended
+between provider acknowledgement and durable completion.
+
 ## Policy And Idempotency
 
 - A child runtime mode may stay equal to or become narrower than the parent
   mode. It may not escalate privileges.
 - A child interaction mode may stay equal to or narrow from `default` to
   `plan`. It may not escalate from `plan` to `default`.
-- General thread management is limited to the calling thread's project. Send
-  additionally enforces the same runtime and interaction privilege ceiling as
-  child creation.
+- General thread management is limited to the calling thread's project unless
+  its credential has the experimental `global-orchestration` capability and its
+  caller thread currently has an active run owned by the credential's exact V2
+  provider runtime session. Send and runtime-request response additionally enforce the same
+  runtime and interaction privilege ceiling as child creation.
 - Provider instances must be enabled, installed, available, authenticated, and
   backed by a V2 adapter.
 - A requested model must be advertised by the selected provider when the
   provider publishes a model list.
 - `clientRequestId` derives stable command, thread, and message IDs within the
-  provider session. Retrying the same call returns the same durable work.
+  caller thread. Retrying the same call returns the same durable work across MCP
+  credential rotation and server restart.
 - Calls without `clientRequestId` receive a generated request key and create
   new work.
 
@@ -365,6 +466,7 @@ runtime_mode_escalation_denied
 interaction_mode_escalation_denied
 task_not_found
 task_not_cancellable
+project_not_found
 thread_not_found
 run_not_found
 thread_not_sendable

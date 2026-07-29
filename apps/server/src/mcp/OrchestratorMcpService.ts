@@ -19,6 +19,15 @@ import {
   type OrchestratorMcpDeleteScheduledTaskInput,
   type OrchestratorMcpDeleteScheduledTaskResult,
   type OrchestratorMcpListScheduledTasksResult,
+  type OrchestratorMcpGoalCreateInput,
+  type OrchestratorMcpGoalListInput,
+  type OrchestratorMcpGoalListResult,
+  type OrchestratorMcpGoalReadInput,
+  type OrchestratorMcpGoalResult,
+  type OrchestratorMcpGoalTaskStartInput,
+  type OrchestratorMcpGoalTaskStartResult,
+  type OrchestratorMcpGoalCancelInput,
+  type OrchestratorMcpProjectListResult,
   type OrchestratorMcpRuntimeMode,
   type OrchestratorMcpScheduledTask,
   type OrchestratorMcpScheduleTaskInput,
@@ -35,20 +44,26 @@ import {
   type OrchestratorMcpThreadListResult,
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadReadResult,
+  type OrchestratorMcpThreadRespondInput,
+  type OrchestratorMcpThreadRespondResult,
   type OrchestratorMcpThreadRun,
   type OrchestratorMcpThreadSendInput,
   type OrchestratorMcpThreadSendResult,
+  type OrchestratorMcpThreadStartInput,
   type OrchestratorMcpThreadTimelineItem,
   type OrchestratorMcpThreadWaitInput,
   type OrchestratorMcpThreadWaitResult,
   type ProviderInteractionMode,
-  ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
+  type ProjectId,
+  type ProjectExecutionProfile,
   type RuntimeMode,
   type ScheduledTask,
   type ScheduledTaskUpsertInput,
   type ServerProvider,
+  type SupervisorTaskAttempt,
+  type SupervisorTaskAttemptId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -57,11 +72,11 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { isBuiltInProviderAdapterDriverV2 } from "../orchestration-v2/builtInProviderAdapterDrivers.ts";
 import { subagentResultForRun } from "../orchestration-v2/SubagentProjection.ts";
+import { ThreadLaunchService } from "../orchestration-v2/ThreadLaunchService.ts";
 import {
   isActiveRun,
   latestActiveRun,
@@ -70,7 +85,14 @@ import {
   ThreadManagementService,
 } from "../orchestration-v2/ThreadManagementService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { ProjectService } from "../project/ProjectService.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
+import type {
+  RuntimeMutationAuthority,
+  SupervisorMutationAuthority,
+} from "../supervisor/SupervisorAuthority.ts";
+import { SupervisorControlPlaneService } from "../supervisor/SupervisorControlPlaneService.ts";
+import { SupervisorGoalCancellationService } from "../supervisor/SupervisorGoalCancellationService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -85,6 +107,33 @@ interface ResolvedTarget {
   readonly modelSelection: ModelSelection;
 }
 
+function executionProfileDefaults(
+  input: Pick<OrchestratorMcpDelegateTaskInput, "target" | "runtimeMode" | "interactionMode">,
+  profile: ProjectExecutionProfile | null,
+) {
+  return {
+    target:
+      input.target ??
+      (profile?.modelSelection === null || profile?.modelSelection === undefined
+        ? undefined
+        : {
+            providerInstanceId: profile.modelSelection.instanceId,
+            model: profile.modelSelection.model,
+            ...(profile.modelSelection.options === undefined
+              ? {}
+              : { options: profile.modelSelection.options }),
+          }),
+    runtimeMode: input.runtimeMode ?? profile?.runtimeMode ?? undefined,
+    interactionMode: input.interactionMode ?? profile?.interactionMode ?? undefined,
+  };
+}
+
+function delegatedTaskProviderInstanceId(
+  task: OrchestrationV2ThreadProjection["subagents"][number],
+) {
+  return task.providerInstanceId;
+}
+
 type TerminalTaskStatus = Extract<
   OrchestratorMcpDelegateTaskResult["status"],
   "completed" | "failed" | "cancelled" | "interrupted"
@@ -97,6 +146,8 @@ export interface OrchestratorMcpServiceShape {
   readonly delegateTask: (
     scope: McpInvocationScope,
     input: OrchestratorMcpDelegateTaskInput,
+    authority?: SupervisorMutationAuthority,
+    supervisorAttemptId?: SupervisorTaskAttemptId,
   ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
   readonly taskStatus: (
     scope: McpInvocationScope,
@@ -105,11 +156,19 @@ export interface OrchestratorMcpServiceShape {
   readonly cancelTask: (
     scope: McpInvocationScope,
     input: OrchestratorMcpTaskCancelInput,
+    authority?: SupervisorMutationAuthority,
   ) => Effect.Effect<OrchestratorMcpTaskCancelResult, OrchestratorMcpFailure>;
   readonly createThreads: (
     scope: McpInvocationScope,
     input: OrchestratorMcpCreateThreadsInput,
   ) => Effect.Effect<OrchestratorMcpCreateThreadsResult, OrchestratorMcpFailure>;
+  readonly listProjects: (
+    scope: McpInvocationScope,
+  ) => Effect.Effect<OrchestratorMcpProjectListResult, OrchestratorMcpFailure>;
+  readonly startThread: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadStartInput,
+  ) => Effect.Effect<OrchestratorMcpCreatedThread, OrchestratorMcpFailure>;
   readonly scheduleTask: (
     scope: McpInvocationScope,
     input: OrchestratorMcpScheduleTaskInput,
@@ -125,6 +184,26 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpDeleteScheduledTaskInput,
   ) => Effect.Effect<OrchestratorMcpDeleteScheduledTaskResult, OrchestratorMcpFailure>;
+  readonly createGoal: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpGoalCreateInput,
+  ) => Effect.Effect<OrchestratorMcpGoalResult, OrchestratorMcpFailure>;
+  readonly listGoals: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpGoalListInput,
+  ) => Effect.Effect<OrchestratorMcpGoalListResult, OrchestratorMcpFailure>;
+  readonly readGoal: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpGoalReadInput,
+  ) => Effect.Effect<OrchestratorMcpGoalResult, OrchestratorMcpFailure>;
+  readonly startGoalTask: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpGoalTaskStartInput,
+  ) => Effect.Effect<OrchestratorMcpGoalTaskStartResult, OrchestratorMcpFailure>;
+  readonly cancelGoal: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpGoalCancelInput,
+  ) => Effect.Effect<OrchestratorMcpGoalResult, OrchestratorMcpFailure>;
   readonly listThreads: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadListInput,
@@ -133,6 +212,10 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadReadInput,
   ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
+  readonly respondToThreadRequest: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadRespondInput,
+  ) => Effect.Effect<OrchestratorMcpThreadRespondResult, OrchestratorMcpFailure>;
   readonly sendToThread: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadSendInput,
@@ -157,6 +240,9 @@ const isThreadManagementError = Schema.is(ThreadManagementError);
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
   return new OrchestratorMcpFailure({ code, message });
 }
+
+const supervisorFailure = (error: { readonly message: string }) =>
+  failure("orchestration_error", error.message);
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -345,13 +431,17 @@ function stableCommandId(input: {
   readonly scope: McpInvocationScope;
   readonly requestKey: string;
   readonly operation: string;
+  readonly projectId?: ProjectId;
+  readonly threadId?: ThreadId;
   readonly index?: number;
 }): CommandId {
   return CommandId.make(
     [
       "command",
       "mcp",
-      stablePart(input.scope.providerSessionId),
+      stablePart(input.scope.threadId),
+      ...(input.projectId === undefined ? [] : [stablePart(input.projectId)]),
+      ...(input.threadId === undefined ? [] : [stablePart(input.threadId)]),
       stablePart(input.operation),
       stablePart(input.requestKey),
       ...(input.index === undefined ? [] : [String(input.index)]),
@@ -368,7 +458,7 @@ function stableThreadId(input: {
     [
       "thread",
       "mcp",
-      stablePart(input.scope.providerSessionId),
+      stablePart(input.scope.threadId),
       stablePart(input.requestKey),
       String(input.index),
     ].join(":"),
@@ -384,7 +474,7 @@ function stableMessageId(input: {
     [
       "message",
       "mcp",
-      stablePart(input.scope.providerSessionId),
+      stablePart(input.scope.threadId),
       stablePart(input.requestKey),
       String(input.index),
     ].join(":"),
@@ -395,16 +485,53 @@ function stableOperationMessageId(input: {
   readonly scope: McpInvocationScope;
   readonly requestKey: string;
   readonly operation: string;
+  readonly projectId?: ProjectId;
+  readonly threadId?: ThreadId;
 }): MessageId {
   return MessageId.make(
     [
       "message",
       "mcp",
-      stablePart(input.scope.providerSessionId),
+      stablePart(input.scope.threadId),
+      ...(input.projectId === undefined ? [] : [stablePart(input.projectId)]),
+      ...(input.threadId === undefined ? [] : [stablePart(input.threadId)]),
       stablePart(input.operation),
       stablePart(input.requestKey),
     ].join(":"),
   );
+}
+
+function supervisorAttemptDelegationCommandId(attemptId: SupervisorTaskAttemptId): CommandId {
+  return CommandId.make(`command:supervisor-goal-attempt:${stablePart(attemptId)}:delegate-task`);
+}
+
+function activeCallerRunForScope(
+  scope: McpInvocationScope,
+  parent: OrchestrationV2ThreadProjection,
+): OrchestrationV2Run | undefined {
+  const activeRun = latestActiveRun(parent);
+  const activeProviderThread =
+    activeRun?.providerThreadId === null || activeRun?.providerThreadId === undefined
+      ? undefined
+      : parent.providerThreads.find((thread) => thread.id === activeRun.providerThreadId);
+  return activeRun !== undefined &&
+    activeRun.providerInstanceId === scope.providerInstanceId &&
+    activeProviderThread?.providerSessionId === scope.runtimeProviderSessionId
+    ? activeRun
+    : undefined;
+}
+
+function supervisorMutationAuthority(scope: McpInvocationScope): SupervisorMutationAuthority {
+  return {
+    threadId: scope.threadId,
+    runtimeProviderSessionId: scope.runtimeProviderSessionId,
+    providerInstanceId: scope.providerInstanceId,
+    runtimeGeneration: scope.runtimeGeneration ?? 0,
+  };
+}
+
+function runtimeMutationAuthority(scope: McpInvocationScope): RuntimeMutationAuthority {
+  return supervisorMutationAuthority(scope);
 }
 
 function threadTitle(input: {
@@ -587,11 +714,49 @@ function timelineItem(input: {
   };
 }
 
+function pendingRequests(
+  projection: OrchestrationV2ThreadProjection,
+): OrchestratorMcpThreadReadResult["pendingRequests"] {
+  return projection.runtimeRequests
+    .filter((request) => request.status === "pending")
+    .map((request) => {
+      const node = projection.nodes.find((candidate) => candidate.id === request.nodeId);
+      const items = projection.turnItems.filter(
+        (candidate) =>
+          (candidate.type === "approval_request" || candidate.type === "user_input_request") &&
+          candidate.requestId === request.id,
+      );
+      const item = items.length === 1 ? items[0] : undefined;
+      return {
+        requestId: request.id,
+        kind: request.kind,
+        status: request.status,
+        respondable:
+          request.responseCapability.type === "live" &&
+          request.responseCommandId === undefined &&
+          item !== undefined,
+        notResumableReason:
+          request.responseCapability.type === "not_resumable"
+            ? request.responseCapability.reason
+            : null,
+        runId: node?.runId ?? null,
+        nodeId: request.nodeId,
+        approvalPrompt: item?.type === "approval_request" ? (item.prompt ?? null) : null,
+        approvalRequestKind: item?.type === "approval_request" ? item.requestKind : null,
+        questions: item?.type === "user_input_request" ? item.questions : null,
+      };
+    });
+}
+
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const threadManagement = yield* ThreadManagementService;
+  const threadLaunch = yield* ThreadLaunchService;
   const providerRegistry = yield* ProviderRegistry;
+  const projectService = yield* ProjectService;
   const scheduledTasks = yield* ScheduledTaskService;
+  const supervisor = yield* SupervisorControlPlaneService;
+  const supervisorCancellation = yield* SupervisorGoalCancellationService;
 
   const requireCapability = (scope: McpInvocationScope) =>
     scope.capabilities.has("orchestration")
@@ -602,6 +767,52 @@ const make = Effect.gen(function* () {
             "This MCP credential does not grant orchestration capabilities.",
           ),
         );
+
+  const requireGlobalOrchestration = (scope: McpInvocationScope) =>
+    supervisor.isDesignatedSupervisor(scope.threadId).pipe(
+      Effect.mapError((error) => failure("orchestration_error", error.message)),
+      Effect.flatMap((designated) =>
+        designated
+          ? Effect.void
+          : Effect.fail(
+              failure(
+                "capability_denied",
+                "This thread is not the current persisted global supervisor.",
+              ),
+            ),
+      ),
+    );
+
+  const requireActiveCallerRun = (
+    scope: McpInvocationScope,
+    parent: OrchestrationV2ThreadProjection,
+  ) => {
+    const activeRun = activeCallerRunForScope(scope, parent);
+    return activeRun !== undefined
+      ? Effect.succeed(activeRun)
+      : Effect.fail(
+          failure(
+            "parent_not_active",
+            "Global orchestration requires an active caller run owned by this MCP provider session.",
+          ),
+        );
+  };
+
+  const requireActiveGlobalOrchestration = (
+    scope: McpInvocationScope,
+    parent: OrchestrationV2ThreadProjection,
+  ) =>
+    Effect.gen(function* () {
+      yield* requireGlobalOrchestration(scope);
+      yield* requireActiveCallerRun(scope, parent);
+    });
+
+  const revalidateGlobalMutation = (scope: McpInvocationScope) =>
+    Effect.gen(function* () {
+      const currentParent = yield* loadProjection(scope.threadId);
+      yield* requireActiveGlobalOrchestration(scope, currentParent);
+      return currentParent;
+    });
 
   const loadProjection = (threadId: ThreadId) =>
     threadManagement
@@ -623,19 +834,46 @@ const make = Effect.gen(function* () {
       .getProjectThread({ projectId, threadId })
       .pipe(
         Effect.mapError(() =>
-          failure("thread_not_found", `Thread ${threadId} was not found in the calling project.`),
+          failure("thread_not_found", `Thread ${threadId} was not found in the selected project.`),
         ),
       );
 
-  const loadScopedThread = (scope: McpInvocationScope, threadId: ThreadId) =>
+  const resolveSelectedProjectId = (
+    scope: McpInvocationScope,
+    parent: OrchestrationV2ThreadProjection,
+    requestedProjectId: ProjectId | undefined,
+  ): Effect.Effect<ProjectId, OrchestratorMcpFailure> =>
+    Effect.gen(function* () {
+      const parentProjectId = parent.thread.projectId;
+      if (requestedProjectId === undefined || requestedProjectId === parentProjectId) {
+        return parentProjectId;
+      }
+      yield* requireActiveGlobalOrchestration(scope, parent);
+      const snapshot = yield* projectService.snapshot.pipe(
+        Effect.mapError((error) =>
+          failure("orchestration_error", `Unable to list projects: ${errorMessage(error)}`),
+        ),
+      );
+      if (!snapshot.projects.some((project) => project.id === requestedProjectId)) {
+        return yield* failure("project_not_found", `Project ${requestedProjectId} was not found.`);
+      }
+      return requestedProjectId;
+    });
+
+  const loadScopedThread = (
+    scope: McpInvocationScope,
+    threadId: ThreadId,
+    requestedProjectId?: ProjectId,
+  ) =>
     Effect.gen(function* () {
       yield* requireCapability(scope);
       const parent = yield* loadProjection(scope.threadId);
+      const projectId = yield* resolveSelectedProjectId(scope, parent, requestedProjectId);
       const target =
-        threadId === scope.threadId
+        threadId === scope.threadId && projectId === parent.thread.projectId
           ? parent
-          : yield* loadProjectThread(parent.thread.projectId, threadId);
-      return { parent, target } as const;
+          : yield* loadProjectThread(projectId, threadId);
+      return { parent, projectId, target } as const;
     });
 
   const loadProviders = providerRegistry.getProviders;
@@ -775,6 +1013,9 @@ const make = Effect.gen(function* () {
         );
       }
       const childProjection = yield* loadProjection(task.childThreadId);
+      if (childProjection.thread.projectId !== parentProjection.thread.projectId) {
+        yield* requireActiveGlobalOrchestration(scope, parentProjection);
+      }
       const childRun = childProjection.runs[0];
       const status = taskStatusForRun(childRun);
       const derivedResult =
@@ -796,11 +1037,71 @@ const make = Effect.gen(function* () {
         childRunId: childRun?.id ?? null,
         childNodeId: task.id,
         status,
-        providerInstanceId: ProviderInstanceId.make(task.driver),
+        providerInstanceId: delegatedTaskProviderInstanceId(task),
         model: task.model,
         summary: derivedResult,
         resultContextTransferId: resultTransfer?.id ?? null,
         waitTimedOut,
+      };
+    });
+
+  const readLinkedGoalAttempt = (
+    attempt: SupervisorTaskAttempt,
+  ): Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure> =>
+    Effect.gen(function* () {
+      if (attempt.nodeId === null || attempt.threadId === null) {
+        return yield* failure(
+          "orchestration_error",
+          `Supervisor attempt ${attempt.id} is not linked to delegated work.`,
+        );
+      }
+      const childProjection = yield* loadProjection(attempt.threadId);
+      const parentThreadId = childProjection.thread.lineage.parentThreadId;
+      if (parentThreadId === null) {
+        return yield* failure(
+          "orchestration_error",
+          `Supervisor attempt ${attempt.id} has no delegated parent thread.`,
+        );
+      }
+      const parentProjection = yield* loadProjection(parentThreadId);
+      const task = parentProjection.subagents.find(
+        (candidate) =>
+          candidate.id === attempt.nodeId &&
+          candidate.origin === "app_owned" &&
+          candidate.childThreadId === attempt.threadId,
+      );
+      if (task === undefined) {
+        return yield* failure(
+          "orchestration_error",
+          `Supervisor attempt ${attempt.id} is linked to missing delegated task ${attempt.nodeId}.`,
+        );
+      }
+      const childRun = childProjection.runs[0];
+      const status = taskStatusForRun(childRun);
+      const derivedResult =
+        task.result !== null
+          ? task.result
+          : childRun !== undefined && isTerminalTaskStatus(status)
+            ? subagentResultForRun(childProjection, childRun).text
+            : null;
+      const resultTransfer =
+        parentProjection.contextTransfers.find(
+          (transfer) =>
+            transfer.type === "subagent_result" &&
+            transfer.sourceThreadId === task.childThreadId &&
+            transfer.targetThreadId === parentThreadId,
+        ) ?? null;
+      return {
+        taskId: task.id,
+        childThreadId: task.childThreadId!,
+        childRunId: childRun?.id ?? null,
+        childNodeId: task.id,
+        status,
+        providerInstanceId: delegatedTaskProviderInstanceId(task),
+        model: task.model,
+        summary: derivedResult,
+        resultContextTransferId: resultTransfer?.id ?? null,
+        waitTimedOut: false,
       };
     });
 
@@ -811,7 +1112,12 @@ const make = Effect.gen(function* () {
         if (isTerminalTaskStatus(result.status)) return result;
         yield* Effect.sleep(Duration.millis(TASK_POLL_INTERVAL_MS));
       }
-    }).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)));
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: Duration.millis(timeoutMs),
+        orElse: () => Effect.succeed(null),
+      }),
+    );
 
   // Load a single scheduled task and enforce that it belongs to the calling
   // thread's project, so agents can only read/mutate tasks in their own scope.
@@ -837,7 +1143,184 @@ const make = Effect.gen(function* () {
       return task;
     });
 
-  return OrchestratorMcpService.of({
+  const service = OrchestratorMcpService.of({
+    createGoal: (scope, input) =>
+      Effect.gen(function* () {
+        const parent = yield* loadProjection(scope.threadId);
+        yield* requireActiveGlobalOrchestration(scope, parent);
+        yield* revalidateGlobalMutation(scope);
+        return yield* supervisor
+          .updateGoal(input, supervisorMutationAuthority(scope))
+          .pipe(Effect.mapError(supervisorFailure));
+      }),
+    listGoals: (scope, input) =>
+      Effect.gen(function* () {
+        const parent = yield* loadProjection(scope.threadId);
+        yield* requireActiveGlobalOrchestration(scope, parent);
+        return yield* supervisor.listGoals(input).pipe(Effect.mapError(supervisorFailure));
+      }),
+    readGoal: (scope, input) =>
+      Effect.gen(function* () {
+        const parent = yield* loadProjection(scope.threadId);
+        yield* requireActiveGlobalOrchestration(scope, parent);
+        let goal = (yield* supervisor
+          .readGoal(input.goalId)
+          .pipe(Effect.mapError(supervisorFailure))).goal;
+        for (const task of goal.tasks) {
+          const attempt = task.attempts.findLast((candidate) => candidate.nodeId !== null);
+          if (attempt?.nodeId === null || attempt?.nodeId === undefined) continue;
+          const delegated = yield* readLinkedGoalAttempt(attempt).pipe(Effect.option);
+          if (delegated._tag === "None") continue;
+          const status = delegated.value.status;
+          const attemptStatus =
+            status === "completed" ||
+            status === "failed" ||
+            status === "cancelled" ||
+            status === "interrupted"
+              ? status
+              : status === "queued"
+                ? "delegated"
+                : "running";
+          if (attemptStatus !== attempt.status) {
+            yield* revalidateGlobalMutation(scope);
+            yield* supervisor
+              .updateAttemptStatus(
+                { attemptId: attempt.id, status: attemptStatus },
+                supervisorMutationAuthority(scope),
+              )
+              .pipe(Effect.mapError(supervisorFailure));
+          }
+        }
+        goal = (yield* supervisor.readGoal(input.goalId).pipe(Effect.mapError(supervisorFailure)))
+          .goal;
+        return { goal };
+      }),
+    startGoalTask: (scope, input) =>
+      Effect.gen(function* () {
+        const parent = yield* loadProjection(scope.threadId);
+        yield* requireActiveGlobalOrchestration(scope, parent);
+        const goal = (yield* supervisor
+          .readGoal(input.goalId)
+          .pipe(Effect.mapError(supervisorFailure))).goal;
+        const task = goal.tasks.find((candidate) => candidate.taskKey === input.taskKey);
+        if (task === undefined) {
+          return yield* failure("task_not_found", `Goal task ${input.taskKey} was not found.`);
+        }
+        yield* resolveSelectedProjectId(scope, parent, task.projectId);
+        const profile = yield* supervisor
+          .getProfile(task.projectId)
+          .pipe(Effect.mapError(supervisorFailure));
+        const providers = yield* loadProviders;
+        const resolvedTarget = yield* resolveTarget({
+          parent,
+          target:
+            profile?.modelSelection === null || profile?.modelSelection === undefined
+              ? undefined
+              : {
+                  providerInstanceId: profile.modelSelection.instanceId,
+                  model: profile.modelSelection.model,
+                  ...(profile.modelSelection.options === undefined
+                    ? {}
+                    : { options: profile.modelSelection.options }),
+                },
+          providers,
+        });
+        const runtimeMode = yield* resolveRuntimeMode(
+          parent.thread.runtimeMode,
+          profile?.runtimeMode ?? undefined,
+        );
+        const interactionMode = yield* resolveInteractionMode(
+          parent.thread.interactionMode,
+          profile?.interactionMode ?? undefined,
+        );
+        yield* revalidateGlobalMutation(scope);
+        const prepared = yield* supervisor
+          .prepareAttempt(
+            {
+              goalId: input.goalId,
+              taskKey: input.taskKey,
+              modelSelection: resolvedTarget.modelSelection,
+              runtimeMode,
+              interactionMode,
+            },
+            supervisorMutationAuthority(scope),
+          )
+          .pipe(Effect.mapError(supervisorFailure));
+        const existing =
+          prepared.attempt.nodeId === null ? null : yield* readLinkedGoalAttempt(prepared.attempt);
+        const delegatedTask =
+          existing ??
+          (yield* service.delegateTask(
+            scope,
+            {
+              projectId: task.projectId,
+              task: task.prompt,
+              title: task.title,
+              role: task.role,
+              mode: "async",
+              clientRequestId: prepared.attempt.clientRequestId,
+              target: {
+                providerInstanceId: prepared.attempt.modelSelection.instanceId,
+                model: prepared.attempt.modelSelection.model,
+                ...(prepared.attempt.modelSelection.options === undefined
+                  ? {}
+                  : { options: prepared.attempt.modelSelection.options }),
+              },
+              runtimeMode: prepared.attempt.runtimeMode,
+              interactionMode: prepared.attempt.interactionMode,
+            },
+            supervisorMutationAuthority(scope),
+            prepared.attempt.id,
+          ));
+        if (prepared.attempt.nodeId === null) {
+          yield* supervisor
+            .linkAttempt(
+              {
+                attemptId: prepared.attempt.id,
+                nodeId: delegatedTask.taskId,
+                threadId: delegatedTask.childThreadId,
+                runId: delegatedTask.childRunId,
+              },
+              supervisorMutationAuthority(scope),
+            )
+            .pipe(Effect.mapError(supervisorFailure));
+        }
+        if (
+          delegatedTask.status === "completed" ||
+          delegatedTask.status === "failed" ||
+          delegatedTask.status === "cancelled" ||
+          delegatedTask.status === "interrupted"
+        ) {
+          yield* revalidateGlobalMutation(scope);
+          yield* supervisor
+            .reconcileAttemptByNodeId(
+              {
+                nodeId: delegatedTask.taskId,
+                status: delegatedTask.status,
+              },
+              supervisorMutationAuthority(scope),
+            )
+            .pipe(Effect.mapError(supervisorFailure));
+        }
+        const updated = (yield* supervisor
+          .readGoal(input.goalId)
+          .pipe(Effect.mapError(supervisorFailure))).goal;
+        return {
+          goal: updated,
+          taskKey: input.taskKey,
+          attemptId: prepared.attempt.id,
+          delegatedTask,
+        };
+      }),
+    cancelGoal: (scope, input) =>
+      Effect.gen(function* () {
+        const parent = yield* loadProjection(scope.threadId);
+        yield* requireActiveGlobalOrchestration(scope, parent);
+        yield* revalidateGlobalMutation(scope);
+        return yield* supervisorCancellation
+          .cancelGoal(input, supervisorMutationAuthority(scope))
+          .pipe(Effect.mapError(supervisorFailure));
+      }),
     scheduleTask: (scope, input) =>
       Effect.gen(function* () {
         yield* requireCapability(scope);
@@ -859,8 +1342,8 @@ const make = Effect.gen(function* () {
           interactionMode: parent.thread.interactionMode,
           createdBy: "agent",
           creationSource: "mcp",
-          // Scope the idempotency key by provider session so two callers
-          // reusing the same clientRequestId cannot collide on one task row.
+          // Scope the idempotency key by caller thread so retries survive MCP
+          // credential rotation without colliding across callers.
           ...(input.clientRequestId === undefined
             ? {}
             : {
@@ -872,7 +1355,7 @@ const make = Effect.gen(function* () {
               }),
         };
         const { task } = yield* scheduledTasks
-          .upsert(upsertInput)
+          .upsert(upsertInput, runtimeMutationAuthority(scope))
           .pipe(
             Effect.mapError((error) =>
               failure("orchestration_error", `Could not schedule task: ${error.message}`),
@@ -935,7 +1418,7 @@ const make = Effect.gen(function* () {
           creationSource: existing.creationSource,
         };
         const { task } = yield* scheduledTasks
-          .upsert(upsertInput)
+          .upsert(upsertInput, runtimeMutationAuthority(scope))
           .pipe(
             Effect.mapError((error) =>
               failure("orchestration_error", `Could not update scheduled task: ${error.message}`),
@@ -952,7 +1435,7 @@ const make = Effect.gen(function* () {
           input.scheduledTaskId,
         );
         yield* scheduledTasks
-          .delete({ id: existing.id })
+          .delete({ id: existing.id }, runtimeMutationAuthority(scope))
           .pipe(
             Effect.mapError((error) =>
               failure("orchestration_error", `Could not delete scheduled task: ${error.message}`),
@@ -1001,11 +1484,14 @@ const make = Effect.gen(function* () {
             threadManagement: true,
             incrementalThreadRead: true,
             scheduledTasks: true,
+            globalProjectSupervision: yield* supervisor
+              .isDesignatedSupervisor(scope.threadId)
+              .pipe(Effect.mapError((error) => failure("orchestration_error", error.message))),
             maxBatchThreads: 20,
           },
         };
       }),
-    delegateTask: (scope, input) =>
+    delegateTask: (scope, input, requiredAuthority, supervisorAttemptId) =>
       Effect.gen(function* () {
         yield* requireCapability(scope);
         const parent = yield* loadProjection(scope.threadId);
@@ -1022,38 +1508,64 @@ const make = Effect.gen(function* () {
             "Delegated tasks require an active run owned by this MCP provider session.",
           );
         }
+        const projectId = yield* resolveSelectedProjectId(scope, parent, input.projectId);
+        const profile = yield* supervisor
+          .getProfile(projectId)
+          .pipe(Effect.mapError((error) => failure("orchestration_error", error.message)));
+        const defaults = executionProfileDefaults(input, profile);
         const providers = yield* loadProviders;
         const target = yield* resolveTarget({
           parent,
-          target: input.target,
+          target: defaults.target,
           providers,
         });
-        const runtimeMode = yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);
+        const runtimeMode = yield* resolveRuntimeMode(
+          parent.thread.runtimeMode,
+          defaults.runtimeMode,
+        );
         const interactionMode = yield* resolveInteractionMode(
           parent.thread.interactionMode,
-          input.interactionMode,
+          defaults.interactionMode,
         );
         const key = yield* requestKey(input.clientRequestId);
-        const commandId = stableCommandId({
-          scope,
-          requestKey: key,
-          operation: "delegate-task",
-        });
+        const commandId =
+          supervisorAttemptId === undefined
+            ? stableCommandId({
+                scope,
+                requestKey: key,
+                operation: "delegate-task",
+                projectId,
+              })
+            : supervisorAttemptDelegationCommandId(supervisorAttemptId);
+        const authority =
+          requiredAuthority ??
+          (projectId === parent.thread.projectId ? undefined : supervisorMutationAuthority(scope));
+        if (authority !== undefined) {
+          yield* revalidateGlobalMutation(scope);
+        }
         const result = yield* threadManagement
-          .dispatch({
-            type: "delegated_task.request",
-            createdBy: "agent",
-            creationSource: "mcp",
-            commandId,
-            parentThreadId: scope.threadId,
-            parentRunId: parentRun.id,
-            parentNodeId: parentRun.rootNodeId,
-            task: taskPrompt(input),
-            ...(input.title === undefined ? {} : { title: input.title }),
-            modelSelection: target.modelSelection,
-            runtimeMode,
-            interactionMode,
-          })
+          .dispatch(
+            {
+              type: "delegated_task.request",
+              createdBy: "agent",
+              creationSource: "mcp",
+              commandId,
+              parentThreadId: scope.threadId,
+              parentRunId: parentRun.id,
+              parentNodeId: parentRun.rootNodeId,
+              task: taskPrompt(input),
+              ...(input.title === undefined ? {} : { title: input.title }),
+              ...(projectId === parent.thread.projectId ? {} : { targetProjectId: projectId }),
+              modelSelection: target.modelSelection,
+              runtimeMode,
+              interactionMode,
+            },
+            {
+              runtimeAuthority: runtimeMutationAuthority(scope),
+              ...(authority === undefined ? {} : { supervisorAuthority: authority }),
+              ...(supervisorAttemptId === undefined ? {} : { supervisorAttemptId }),
+            },
+          )
           .pipe(
             Effect.mapError((error) =>
               failure(
@@ -1080,13 +1592,13 @@ const make = Effect.gen(function* () {
           MAX_WAIT_TIMEOUT_MS,
           Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
         );
-        const waited = yield* waitForTask(scope, taskEvent.event.payload.id, timeoutMs);
-        return Option.isSome(waited)
-          ? waited.value
-          : yield* readTask(scope, taskEvent.event.payload.id, true);
+        const response =
+          (yield* waitForTask(scope, taskEvent.event.payload.id, timeoutMs)) ??
+          (yield* readTask(scope, taskEvent.event.payload.id, true));
+        return response;
       }),
     taskStatus: (scope, taskId) => readTask(scope, taskId),
-    cancelTask: (scope, input) =>
+    cancelTask: (scope, input, requiredAuthority) =>
       Effect.gen(function* () {
         const current = yield* readTask(scope, input.taskId);
         if (isTerminalTaskStatus(current.status)) {
@@ -1104,18 +1616,33 @@ const make = Effect.gen(function* () {
           );
         }
         const key = yield* requestKey(input.clientRequestId);
+        const currentParent = yield* loadProjection(scope.threadId);
+        const authority =
+          requiredAuthority ??
+          (child.thread.projectId === currentParent.thread.projectId
+            ? undefined
+            : supervisorMutationAuthority(scope));
+        if (authority !== undefined) {
+          yield* revalidateGlobalMutation(scope);
+        }
         yield* threadManagement
-          .dispatch({
-            type: "run.interrupt",
-            commandId: stableCommandId({
-              scope,
-              requestKey: key,
-              operation: "cancel-task",
-            }),
-            threadId: current.childThreadId,
-            runId: activeRun.id,
-            ...(input.reason === undefined ? {} : { reason: input.reason }),
-          })
+          .dispatch(
+            {
+              type: "run.interrupt",
+              commandId: stableCommandId({
+                scope,
+                requestKey: key,
+                operation: "cancel-task",
+              }),
+              threadId: current.childThreadId,
+              runId: activeRun.id,
+              ...(input.reason === undefined ? {} : { reason: input.reason }),
+            },
+            {
+              runtimeAuthority: runtimeMutationAuthority(scope),
+              ...(authority === undefined ? {} : { supervisorAuthority: authority }),
+            },
+          )
           .pipe(
             Effect.mapError((error) =>
               failure(
@@ -1176,25 +1703,28 @@ const make = Effect.gen(function* () {
                 index,
               });
               yield* threadManagement
-                .dispatch({
-                  type: "thread.create",
-                  createdBy: "agent",
-                  creationSource: "mcp",
-                  commandId: stableCommandId({
-                    scope,
-                    requestKey: key,
-                    operation: "create-thread",
-                    index,
-                  }),
-                  threadId,
-                  projectId: parent.thread.projectId,
-                  title,
-                  modelSelection: target.modelSelection,
-                  runtimeMode,
-                  interactionMode,
-                  branch: parent.thread.branch,
-                  worktreePath: parent.thread.worktreePath,
-                })
+                .dispatch(
+                  {
+                    type: "thread.create",
+                    createdBy: "agent",
+                    creationSource: "mcp",
+                    commandId: stableCommandId({
+                      scope,
+                      requestKey: key,
+                      operation: "create-thread",
+                      index,
+                    }),
+                    threadId,
+                    projectId: parent.thread.projectId,
+                    title,
+                    modelSelection: target.modelSelection,
+                    runtimeMode,
+                    interactionMode,
+                    branch: parent.thread.branch,
+                    worktreePath: parent.thread.worktreePath,
+                  },
+                  { runtimeAuthority: runtimeMutationAuthority(scope) },
+                )
                 .pipe(
                   Effect.mapError((error) =>
                     failure(
@@ -1205,27 +1735,30 @@ const make = Effect.gen(function* () {
                 );
               if (request.prompt !== undefined) {
                 yield* threadManagement
-                  .dispatch({
-                    type: "message.dispatch",
-                    createdBy: "agent",
-                    creationSource: "mcp",
-                    commandId: stableCommandId({
-                      scope,
-                      requestKey: key,
-                      operation: "dispatch-thread",
-                      index,
-                    }),
-                    threadId,
-                    messageId: stableMessageId({
-                      scope,
-                      requestKey: key,
-                      index,
-                    }),
-                    text: request.prompt,
-                    attachments: [],
-                    modelSelection: target.modelSelection,
-                    dispatchMode: { type: "start_immediately" },
-                  })
+                  .dispatch(
+                    {
+                      type: "message.dispatch",
+                      createdBy: "agent",
+                      creationSource: "mcp",
+                      commandId: stableCommandId({
+                        scope,
+                        requestKey: key,
+                        operation: "dispatch-thread",
+                        index,
+                      }),
+                      threadId,
+                      messageId: stableMessageId({
+                        scope,
+                        requestKey: key,
+                        index,
+                      }),
+                      text: request.prompt,
+                      attachments: [],
+                      modelSelection: target.modelSelection,
+                      dispatchMode: { type: "start_immediately" },
+                    },
+                    { runtimeAuthority: runtimeMutationAuthority(scope) },
+                  )
                   .pipe(
                     Effect.mapError((error) =>
                       failure(
@@ -1238,20 +1771,23 @@ const make = Effect.gen(function* () {
               const projection = yield* loadProjection(threadId);
               const run = projection.runs.at(-1);
               yield* threadManagement
-                .dispatch({
-                  type: "thread.created.record",
-                  commandId: stableCommandId({
-                    scope,
-                    requestKey: key,
-                    operation: "record-created-thread",
-                    index,
-                  }),
-                  parentThreadId: scope.threadId,
-                  parentRunId: parentRun.id,
-                  parentNodeId,
-                  targetThreadId: threadId,
-                  targetRunId: run?.id ?? null,
-                })
+                .dispatch(
+                  {
+                    type: "thread.created.record",
+                    commandId: stableCommandId({
+                      scope,
+                      requestKey: key,
+                      operation: "record-created-thread",
+                      index,
+                    }),
+                    parentThreadId: scope.threadId,
+                    parentRunId: parentRun.id,
+                    parentNodeId,
+                    targetThreadId: threadId,
+                    targetRunId: run?.id ?? null,
+                  },
+                  { runtimeAuthority: runtimeMutationAuthority(scope) },
+                )
                 .pipe(
                   Effect.mapError((error) =>
                     failure(
@@ -1275,13 +1811,134 @@ const make = Effect.gen(function* () {
         );
         return { threads: created };
       }),
+    listProjects: (scope) =>
+      Effect.gen(function* () {
+        yield* requireCapability(scope);
+        const parent = yield* loadProjection(scope.threadId);
+        yield* requireActiveGlobalOrchestration(scope, parent);
+        const snapshot = yield* projectService.snapshot.pipe(
+          Effect.mapError((error) =>
+            failure("orchestration_error", `Unable to list projects: ${errorMessage(error)}`),
+          ),
+        );
+        return {
+          currentProjectId: parent.thread.projectId,
+          projects: snapshot.projects.map((project) => ({
+            projectId: project.id,
+            title: project.title,
+          })),
+        } satisfies OrchestratorMcpProjectListResult;
+      }),
+    startThread: (scope, input) =>
+      Effect.gen(function* () {
+        yield* requireCapability(scope);
+        const parent = yield* loadProjection(scope.threadId);
+        const projectId = yield* resolveSelectedProjectId(scope, parent, input.projectId);
+        if (projectId === parent.thread.projectId) {
+          const createInput: OrchestratorMcpCreateThreadsInput = {
+            ...(input.clientRequestId === undefined
+              ? {}
+              : { clientRequestId: input.clientRequestId }),
+            threads: [
+              {
+                prompt: input.prompt,
+                ...(input.title === undefined ? {} : { title: input.title }),
+                ...(input.target === undefined ? {} : { target: input.target }),
+                ...(input.runtimeMode === undefined ? {} : { runtimeMode: input.runtimeMode }),
+                ...(input.interactionMode === undefined
+                  ? {}
+                  : { interactionMode: input.interactionMode }),
+              },
+            ],
+          };
+          const result = yield* service.createThreads(scope, createInput);
+          return result.threads[0]!;
+        }
+
+        const parentRun = latestActiveRun(parent);
+        if (
+          parentRun === undefined ||
+          parentRun.rootNodeId === null ||
+          parentRun.providerInstanceId !== scope.providerInstanceId
+        ) {
+          return yield* failure(
+            "parent_not_active",
+            "Thread creation requires an active run owned by this MCP provider session.",
+          );
+        }
+        const providers = yield* loadProviders;
+        const target = yield* resolveTarget({ parent, target: input.target, providers });
+        const runtimeMode = yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);
+        const interactionMode = yield* resolveInteractionMode(
+          parent.thread.interactionMode,
+          input.interactionMode,
+        );
+        const key = yield* requestKey(input.clientRequestId);
+        yield* revalidateGlobalMutation(scope);
+        const launch = yield* threadLaunch
+          .launch({
+            commandId: stableCommandId({
+              scope,
+              requestKey: key,
+              operation: "start-thread",
+              projectId,
+            }),
+            projectId,
+            title: threadTitle({
+              parentTitle: parent.thread.title,
+              prompt: input.prompt,
+              title: input.title,
+              index: 0,
+            }),
+            modelSelection: target.modelSelection,
+            runtimeMode,
+            interactionMode,
+            workspaceStrategy: { type: "root" },
+            initialMessage: {
+              messageId: stableOperationMessageId({
+                scope,
+                requestKey: key,
+                operation: "start-thread",
+                projectId,
+              }),
+              text: input.prompt,
+              attachments: [],
+            },
+            createdBy: "agent",
+            creationSource: "mcp",
+            dispatchOptions: {
+              runtimeAuthority: runtimeMutationAuthority(scope),
+              supervisorAuthority: supervisorMutationAuthority(scope),
+            },
+          })
+          .pipe(
+            Effect.mapError((error) =>
+              failure(
+                "orchestration_error",
+                `Unable to start thread in project ${projectId}: ${errorMessage(error)}`,
+              ),
+            ),
+          );
+        const run = latestRun(launch.projection);
+        return {
+          threadId: launch.threadId,
+          runId: run?.id ?? null,
+          status: run?.status ?? "idle",
+          title: launch.projection.thread.title,
+          createdBy: launch.projection.thread.createdBy,
+          creationSource: launch.projection.thread.creationSource,
+          providerInstanceId: target.modelSelection.instanceId,
+          model: target.modelSelection.model,
+        } satisfies OrchestratorMcpCreatedThread;
+      }),
     listThreads: (scope, input) =>
       Effect.gen(function* () {
         yield* requireCapability(scope);
         const parent = yield* loadProjection(scope.threadId);
+        const projectId = yield* resolveSelectedProjectId(scope, parent, input.projectId);
         const projectThreads = yield* threadManagement
           .listProjectThreads({
-            projectId: parent.thread.projectId,
+            projectId,
             includeSubagents: input.includeSubagents !== false,
           })
           .pipe(
@@ -1303,7 +1960,7 @@ const make = Effect.gen(function* () {
         const page = filtered.slice(cursor, cursor + limit);
         const nextCursor = cursor + page.length < filtered.length ? cursor + page.length : null;
         return {
-          projectId: parent.thread.projectId,
+          projectId,
           currentThreadId: scope.threadId,
           threads: page.map(listItemFromShell),
           nextCursor,
@@ -1312,7 +1969,7 @@ const make = Effect.gen(function* () {
       }),
     readThread: (scope, input) =>
       Effect.gen(function* () {
-        const { target } = yield* loadScopedThread(scope, input.threadId);
+        const { target } = yield* loadScopedThread(scope, input.threadId, input.projectId);
         const view = input.view ?? "messages";
         const afterPosition = input.afterPosition ?? -1;
         const limit = input.limit ?? DEFAULT_THREAD_READ_LIMIT;
@@ -1354,14 +2011,108 @@ const make = Effect.gen(function* () {
             .toSorted((left, right) => right.ordinal - left.ordinal)
             .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT)
             .map(threadRun),
+          pendingRequests: pendingRequests(target),
           items: page.map((row) => timelineItem({ row, maxChars, messagesByThreadId })),
           nextPosition: page.at(-1)?.position ?? null,
           hasMore: page.length < matching.length,
         } satisfies OrchestratorMcpThreadReadResult;
       }),
+    respondToThreadRequest: (scope, input) =>
+      Effect.gen(function* () {
+        const { parent, projectId, target } = yield* loadScopedThread(
+          scope,
+          input.threadId,
+          input.projectId,
+        );
+        yield* resolveRuntimeMode(parent.thread.runtimeMode, target.thread.runtimeMode);
+        yield* resolveInteractionMode(parent.thread.interactionMode, target.thread.interactionMode);
+        const request = target.runtimeRequests.find(
+          (candidate) => candidate.id === input.requestId,
+        );
+        if (request === undefined) {
+          return yield* failure(
+            "invalid_request",
+            `Runtime request ${input.requestId} was not found in thread ${input.threadId}.`,
+          );
+        }
+        const requestItems = target.turnItems.filter(
+          (item) =>
+            (item.type === "approval_request" || item.type === "user_input_request") &&
+            item.requestId === input.requestId,
+        );
+        if (requestItems.length !== 1) {
+          return yield* failure(
+            "invalid_request",
+            `Runtime request ${input.requestId} does not have one unambiguous request item.`,
+          );
+        }
+        const requestItem = requestItems[0]!;
+        const hasDecision = input.decision !== undefined;
+        const hasAnswers = input.answers !== undefined;
+        if (requestItem.type === "approval_request" && (!hasDecision || hasAnswers)) {
+          return yield* failure(
+            "invalid_request",
+            `Approval request ${input.requestId} requires decision and does not accept answers.`,
+          );
+        }
+        if (requestItem.type === "user_input_request" && (!hasAnswers || hasDecision)) {
+          return yield* failure(
+            "invalid_request",
+            `User-input request ${input.requestId} requires answers and does not accept decision.`,
+          );
+        }
+        if (request.status === "pending" && request.responseCapability.type !== "live") {
+          return yield* failure("invalid_request", request.responseCapability.reason);
+        }
+
+        const key = yield* requestKey(input.clientRequestId);
+        if (projectId !== parent.thread.projectId) {
+          yield* revalidateGlobalMutation(scope);
+        }
+        yield* threadManagement
+          .dispatch(
+            {
+              type: "runtime-request.respond",
+              commandId: stableCommandId({
+                scope,
+                requestKey: key,
+                operation: `thread-respond:${input.requestId}:attempt:${request.responseAttempt ?? 0}`,
+                projectId,
+                threadId: input.threadId,
+              }),
+              threadId: input.threadId,
+              requestId: input.requestId,
+              ...(input.decision === undefined ? {} : { decision: input.decision }),
+              ...(input.answers === undefined ? {} : { answers: input.answers }),
+            },
+            {
+              runtimeAuthority: runtimeMutationAuthority(scope),
+              ...(projectId === parent.thread.projectId
+                ? {}
+                : { supervisorAuthority: supervisorMutationAuthority(scope) }),
+            },
+          )
+          .pipe(
+            Effect.mapError((error) =>
+              failure(
+                "invalid_request",
+                `Unable to respond to runtime request ${input.requestId}: ${errorMessage(error)}`,
+              ),
+            ),
+          );
+        return {
+          threadId: input.threadId,
+          requestId: input.requestId,
+          status: "accepted_for_delivery",
+        } satisfies OrchestratorMcpThreadRespondResult;
+      }),
     sendToThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent, target } = yield* loadScopedThread(scope, input.threadId);
+        const { parent, projectId, target } = yield* loadScopedThread(
+          scope,
+          input.threadId,
+          input.projectId,
+        );
         yield* resolveRuntimeMode(parent.thread.runtimeMode, target.thread.runtimeMode);
         yield* resolveInteractionMode(parent.thread.interactionMode, target.thread.interactionMode);
 
@@ -1371,14 +2122,21 @@ const make = Effect.gen(function* () {
           scope,
           requestKey: key,
           operation: "thread-send",
+          projectId,
+          threadId: input.threadId,
         });
+        if (projectId !== parent.thread.projectId) {
+          yield* revalidateGlobalMutation(scope);
+        }
         const result = yield* threadManagement
           .sendToThread({
-            projectId: parent.thread.projectId,
+            projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
               operation: "thread-send",
+              projectId,
+              threadId: input.threadId,
             }),
             threadId: input.threadId,
             messageId,
@@ -1387,6 +2145,12 @@ const make = Effect.gen(function* () {
             mode,
             createdBy: "agent",
             creationSource: "mcp",
+            dispatchOptions: {
+              runtimeAuthority: runtimeMutationAuthority(scope),
+              ...(projectId === parent.thread.projectId
+                ? {}
+                : { supervisorAuthority: supervisorMutationAuthority(scope) }),
+            },
           })
           .pipe(
             Effect.mapError((error) =>
@@ -1406,10 +2170,10 @@ const make = Effect.gen(function* () {
       }),
     waitForThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { projectId } = yield* loadScopedThread(scope, input.threadId, input.projectId);
         const result = yield* threadManagement
           .waitForThread({
-            projectId: parent.thread.projectId,
+            projectId,
             threadId: input.threadId,
             ...(input.runId === undefined ? {} : { runId: input.runId }),
             timeoutMs: Math.min(
@@ -1434,19 +2198,34 @@ const make = Effect.gen(function* () {
       }),
     interruptThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { parent, projectId } = yield* loadScopedThread(
+          scope,
+          input.threadId,
+          input.projectId,
+        );
         const key = yield* requestKey(input.clientRequestId);
+        if (projectId !== parent.thread.projectId) {
+          yield* revalidateGlobalMutation(scope);
+        }
         const result = yield* threadManagement
           .interruptThread({
-            projectId: parent.thread.projectId,
+            projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
               operation: "thread-interrupt",
+              projectId,
+              threadId: input.threadId,
             }),
             threadId: input.threadId,
             ...(input.runId === undefined ? {} : { runId: input.runId }),
             ...(input.reason === undefined ? {} : { reason: input.reason }),
+            dispatchOptions: {
+              runtimeAuthority: runtimeMutationAuthority(scope),
+              ...(projectId === parent.thread.projectId
+                ? {}
+                : { supervisorAuthority: supervisorMutationAuthority(scope) }),
+            },
           })
           .pipe(
             Effect.mapError((error) =>
@@ -1474,10 +2253,30 @@ const make = Effect.gen(function* () {
         } satisfies OrchestratorMcpThreadInterruptResult;
       }),
   });
+  return service;
 });
 
 export const layer: Layer.Layer<
   OrchestratorMcpService,
   never,
-  Crypto.Crypto | ThreadManagementService | ProviderRegistry | ScheduledTaskService
+  | Crypto.Crypto
+  | ThreadManagementService
+  | ThreadLaunchService
+  | ProviderRegistry
+  | ProjectService
+  | ScheduledTaskService
+  | SupervisorControlPlaneService
+  | SupervisorGoalCancellationService
 > = Layer.effect(OrchestratorMcpService, make);
+
+/** Exposed for focused idempotency tests. */
+export const __testing = {
+  stableCommandId,
+  stableThreadId,
+  stableMessageId,
+  stableOperationMessageId,
+  activeCallerRunForScope,
+  executionProfileDefaults,
+  delegatedTaskProviderInstanceId,
+  supervisorAttemptDelegationCommandId,
+};

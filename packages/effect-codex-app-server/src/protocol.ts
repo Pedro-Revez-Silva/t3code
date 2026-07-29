@@ -159,6 +159,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     const nextRequestId = yield* Ref.make(1);
     const remainder = yield* Ref.make("");
     const terminationHandled = yield* Ref.make(false);
+    const scope = yield* Effect.scope;
 
     const logProtocol = (event: CodexAppServerProtocolLogEvent) => {
       if (event.direction === "incoming" && !options.logIncoming) {
@@ -274,17 +275,25 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
         Effect.andThen(
           options.onRequest
             ? options.onRequest(request).pipe(
-                Effect.matchEffect({
-                  onFailure: (error) =>
-                    respondError(
-                      request.id,
-                      CodexError.CodexAppServerRequestError.fromAppServerError(
-                        error,
-                        request.method,
-                      ),
-                    ),
-                  onSuccess: (result) => respond(request.id, result),
+                Effect.flatMap((result) => respond(request.id, result)),
+                Effect.catchCause((cause) => {
+                  if (Cause.hasInterruptsOnly(cause)) return Effect.void;
+                  const error = Cause.hasDies(cause) ? cause : Cause.squash(cause);
+                  return respondError(
+                    request.id,
+                    isCodexAppServerError(error)
+                      ? CodexError.CodexAppServerRequestError.fromAppServerError(
+                          error,
+                          request.method,
+                        )
+                      : CodexError.CodexAppServerRequestError.internalError(
+                          `Codex App Server request handler failed for method '${request.method}'`,
+                          undefined,
+                          { method: request.method, operation: "handle-request", cause: error },
+                        ),
+                  );
                 }),
+                Effect.forkIn(scope, { startImmediately: true }),
               )
             : Effect.void,
         ),

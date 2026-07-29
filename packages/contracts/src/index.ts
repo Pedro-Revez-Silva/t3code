@@ -35,5 +35,6 @@ export * from "./review.ts";
 export * from "./preview.ts";
 export * from "./previewAutomation.ts";
 export * from "./scheduledTask.ts";
+export * from "./supervisorControlPlane.ts";
 export * from "./worktreeMcp.ts";
 export * from "./rpc.ts";

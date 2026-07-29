@@ -30,7 +30,7 @@ export class ProviderTurnControlError extends Schema.TaggedErrorClass<ProviderTu
   "ProviderTurnControlError",
   {
     threadId: ThreadId,
-    operation: Schema.Literals(["interrupt", "restart", "steer"]),
+    operation: Schema.Literals(["interrupt", "restart", "steer", "hard_stop"]),
     providerTurnId: ProviderTurnId,
     cause: Schema.optional(Schema.Defect()),
   },
@@ -60,6 +60,12 @@ export interface ProviderTurnControlServiceV2Shape {
     readonly providerTurnId: ProviderTurnId;
     readonly interruptedAttemptId: RunAttemptId;
   }) => Effect.Effect<void, ProviderTurnControlError>;
+  readonly hardStop: (input: {
+    readonly threadId: ThreadId;
+    readonly providerSessionId: ProviderSessionId;
+    readonly providerThreadId: ProviderThreadId;
+    readonly providerTurnId: ProviderTurnId;
+  }) => Effect.Effect<void, ProviderTurnControlError>;
 }
 
 export class ProviderTurnControlServiceV2 extends Context.Service<
@@ -83,7 +89,7 @@ export const layer: Layer.Layer<
       readonly replacementProviderSessionId?: ProviderSessionId;
       readonly providerThreadId: ProviderThreadId;
       readonly providerTurnId: ProviderTurnId;
-      readonly operation: "interrupt" | "restart" | "steer";
+      readonly operation: "interrupt" | "restart" | "steer" | "hard_stop";
     }) =>
       Effect.gen(function* () {
         const projection = yield* projections.getThreadProjection(input.threadId);
@@ -243,6 +249,30 @@ export const layer: Layer.Layer<
               : new ProviderTurnControlError({
                   threadId: input.threadId,
                   operation: "restart",
+                  providerTurnId: input.providerTurnId,
+                  cause,
+                }),
+          ),
+        ),
+      hardStop: (input) =>
+        Effect.gen(function* () {
+          const loaded = yield* load({ ...input, operation: "hard_stop" });
+          if (loaded.providerTurn.status !== "running") return;
+          yield* sessions.hardDetach({
+            providerSessionId: input.providerSessionId,
+            threadId: input.threadId,
+            providerInstanceId: loaded.providerThread.providerInstanceId,
+            providerThreadId: input.providerThreadId,
+            providerTurnId: input.providerTurnId,
+            detail: `Provider turn ${input.providerTurnId} did not confirm terminal state after interruption.`,
+          });
+        }).pipe(
+          Effect.mapError((cause) =>
+            isProviderTurnControlError(cause)
+              ? cause
+              : new ProviderTurnControlError({
+                  threadId: input.threadId,
+                  operation: "hard_stop",
                   providerTurnId: input.providerTurnId,
                   cause,
                 }),

@@ -6,6 +6,7 @@ import {
   ProviderTurnId,
   RunAttemptId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -16,17 +17,22 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import { CheckpointRollbackServiceV2 } from "./CheckpointRollbackService.ts";
-import type { OrchestrationEffectV2 } from "./EffectOutbox.ts";
+import { EffectOutboxV2, type OrchestrationEffectV2 } from "./EffectOutbox.ts";
 import {
   executorLayer,
   isNonRetryableProviderTurnControlFailure,
   OrchestrationEffectExecutorV2,
+  OrchestrationEffectWorkerV2,
+  layerWithOptions as workerLayerWithOptions,
 } from "./EffectWorker.ts";
 import { RunFinalizationService } from "./RunFinalizationService.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { ProviderTurnControlServiceV2 } from "./ProviderTurnControlService.ts";
 import { ProviderTurnStartError, ProviderTurnStartServiceV2 } from "./ProviderTurnStartService.ts";
-import { RuntimeRequestServiceV2 } from "./RuntimeRequestService.ts";
+import {
+  RuntimeRequestResponseExecutionError,
+  RuntimeRequestServiceV2,
+} from "./RuntimeRequestService.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
 const oldSessionId = ProviderSessionId.make("provider-session:effect-worker-restart:old");
@@ -76,6 +82,7 @@ function restartEffect(
 function makeExecutorLayer(input: {
   readonly events: Ref.Ref<ReadonlyArray<string>>;
   readonly failFirstStart?: Ref.Ref<boolean>;
+  readonly runtimeRequests?: RuntimeRequestServiceV2["Service"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const dependencies = Layer.mergeAll(
@@ -84,6 +91,7 @@ function makeExecutorLayer(input: {
       ProviderTurnControlServiceV2.of({
         interrupt: () => Effect.void,
         steer: () => Effect.void,
+        hardStop: () => Effect.void,
         interruptAndAwaitTerminal: (request) =>
           record(
             request.replacementProviderSessionId === undefined
@@ -101,6 +109,7 @@ function makeExecutorLayer(input: {
         close: () => Effect.void,
         release: () => record("release"),
         detach: () => record("detach"),
+        hardDetach: () => Effect.void,
       }),
     ),
     Layer.succeed(
@@ -131,7 +140,12 @@ function makeExecutorLayer(input: {
     ),
     Layer.succeed(
       RuntimeRequestServiceV2,
-      RuntimeRequestServiceV2.of({ respond: () => Effect.void }),
+      input.runtimeRequests ??
+        RuntimeRequestServiceV2.of({
+          respond: () => Effect.void,
+          releasePendingResponse: () => Effect.succeed(false),
+          isDeliveryAcknowledged: () => Effect.succeed(false),
+        }),
     ),
   );
   return executorLayer.pipe(Layer.provide(dependencies));
@@ -215,5 +229,141 @@ it.effect("safely retries after replacement cleanup succeeds and start fails", (
       "detach",
       "start",
     ]);
+  }),
+);
+
+it.effect("releases a runtime response reservation after terminal effect failure", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const timestamp = DateTime.formatIso(now);
+    const requestId = RuntimeRequestId.make("request:effect-worker-terminal-release");
+    const commandId = CommandId.make("command:effect-worker-terminal-release");
+    const effect = {
+      id: "effect:runtime-request-terminal-release",
+      commandId,
+      threadId,
+      request: {
+        type: "runtime-request.respond" as const,
+        providerSessionId: oldSessionId,
+        requestId,
+        decision: "accept" as const,
+      },
+      status: "running" as const,
+      attemptCount: 1,
+      availableAt: timestamp,
+      leaseOwner: "terminal-release-worker",
+      leaseExpiresAt: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      completedAt: null,
+      lastError: null,
+    } satisfies OrchestrationEffectV2;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const released = yield* Ref.make<
+      ReadonlyArray<{ readonly requestId: RuntimeRequestId; readonly commandId: CommandId }>
+    >([]);
+    const runtimeRequests = RuntimeRequestServiceV2.of({
+      respond: () =>
+        Effect.fail(
+          new RuntimeRequestResponseExecutionError({
+            threadId,
+            requestId,
+            cause: "simulated terminal provider failure",
+          }),
+        ),
+      releasePendingResponse: (input) =>
+        Ref.update(released, (current) => [
+          ...current,
+          { requestId: input.requestId, commandId: input.commandId },
+        ]).pipe(Effect.as(true)),
+      isDeliveryAcknowledged: () => Effect.succeed(false),
+    });
+    const executor = makeExecutorLayer({ events, runtimeRequests });
+    const outbox = Layer.mock(EffectOutboxV2)({
+      claimNext: () => Effect.succeed(Option.some(effect)),
+      get: () => Effect.succeed(Option.some(effect)),
+      awaitCancellation: () => Effect.never,
+      clearCancellation: () => Effect.void,
+      fail: () => Effect.succeed(true),
+    });
+    const worker = workerLayerWithOptions({
+      workerId: "terminal-release-worker",
+      maxAttempts: 1,
+    }).pipe(Layer.provide(Layer.merge(outbox, executor)));
+
+    assert.isTrue(
+      yield* OrchestrationEffectWorkerV2.pipe(
+        Effect.flatMap((service) => service.runOnce),
+        Effect.provide(worker),
+      ),
+    );
+    assert.deepEqual(yield* Ref.get(released), [{ requestId, commandId }]);
+  }),
+);
+
+it.effect("retries acknowledged response persistence beyond the normal attempt cap", () =>
+  Effect.gen(function* () {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const requestId = RuntimeRequestId.make("request:effect-worker-acknowledged-retry");
+    const effect = {
+      id: "effect:runtime-request-acknowledged-retry",
+      commandId: CommandId.make("command:effect-worker-acknowledged-retry"),
+      threadId,
+      request: {
+        type: "runtime-request.respond" as const,
+        providerSessionId: oldSessionId,
+        requestId,
+        decision: "accept" as const,
+      },
+      status: "running" as const,
+      attemptCount: 5,
+      availableAt: now,
+      leaseOwner: "acknowledged-retry-worker",
+      leaseExpiresAt: now,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      lastError: null,
+    } satisfies OrchestrationEffectV2;
+    const retryCount = yield* Ref.make(0);
+    const failCount = yield* Ref.make(0);
+    const releaseCount = yield* Ref.make(0);
+    const runtimeRequests = RuntimeRequestServiceV2.of({
+      respond: () =>
+        Effect.fail(
+          new RuntimeRequestResponseExecutionError({
+            threadId,
+            requestId,
+            cause: "simulated completion persistence failure",
+          }),
+        ),
+      releasePendingResponse: () =>
+        Ref.update(releaseCount, (count) => count + 1).pipe(Effect.as(false)),
+      isDeliveryAcknowledged: () => Effect.succeed(true),
+    });
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const executor = makeExecutorLayer({ events, runtimeRequests });
+    const outbox = Layer.mock(EffectOutboxV2)({
+      claimNext: () => Effect.succeed(Option.some(effect)),
+      get: () => Effect.succeed(Option.some(effect)),
+      awaitCancellation: () => Effect.never,
+      clearCancellation: () => Effect.void,
+      retry: () => Ref.update(retryCount, (count) => count + 1).pipe(Effect.as(true)),
+      fail: () => Ref.update(failCount, (count) => count + 1).pipe(Effect.as(true)),
+    });
+    const worker = workerLayerWithOptions({
+      workerId: "acknowledged-retry-worker",
+      maxAttempts: 5,
+    }).pipe(Layer.provide(Layer.merge(outbox, executor)));
+
+    assert.isTrue(
+      yield* OrchestrationEffectWorkerV2.pipe(
+        Effect.flatMap((service) => service.runOnce),
+        Effect.provide(worker),
+      ),
+    );
+    assert.equal(yield* Ref.get(retryCount), 1);
+    assert.equal(yield* Ref.get(failCount), 0);
+    assert.equal(yield* Ref.get(releaseCount), 0);
   }),
 );

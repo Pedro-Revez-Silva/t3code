@@ -30,6 +30,7 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import { makeProviderFailure } from "./ProviderFailure.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
+import type { OrchestratorV2DispatchOptions } from "./Orchestrator.ts";
 
 export type ThreadLaunchWorkspaceStrategy =
   | { readonly type: "root"; readonly branch?: string | undefined }
@@ -64,6 +65,7 @@ export interface ThreadLaunchInput {
   readonly initialMessage?: ThreadLaunchInitialMessage;
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  readonly dispatchOptions?: OrchestratorV2DispatchOptions;
 }
 
 export interface ThreadLaunchResult {
@@ -436,25 +438,31 @@ export const make = Effect.gen(function* () {
             : null;
         const claimDispatch =
           input.reuseExistingThread === true
-            ? threads.dispatch({
-                type: "thread.metadata.update",
-                commandId: input.commandId,
-                threadId: candidateThreadId,
-              })
-            : threads.dispatch({
-                type: "thread.create",
-                commandId: input.commandId,
-                threadId: candidateThreadId,
-                projectId: input.projectId,
-                title: input.title,
-                modelSelection: input.modelSelection,
-                runtimeMode: input.runtimeMode,
-                interactionMode: input.interactionMode,
-                branch: initialBranch,
-                worktreePath: initialWorktreePath,
-                createdBy: input.createdBy,
-                creationSource: input.creationSource,
-              });
+            ? threads.dispatch(
+                {
+                  type: "thread.metadata.update",
+                  commandId: input.commandId,
+                  threadId: candidateThreadId,
+                },
+                input.dispatchOptions,
+              )
+            : threads.dispatch(
+                {
+                  type: "thread.create",
+                  commandId: input.commandId,
+                  threadId: candidateThreadId,
+                  projectId: input.projectId,
+                  title: input.title,
+                  modelSelection: input.modelSelection,
+                  runtimeMode: input.runtimeMode,
+                  interactionMode: input.interactionMode,
+                  branch: initialBranch,
+                  worktreePath: initialWorktreePath,
+                  createdBy: input.createdBy,
+                  creationSource: input.creationSource,
+                },
+                input.dispatchOptions,
+              );
         const claimed = yield* claimDispatch.pipe(
           Effect.mapError(
             mapError(
@@ -483,18 +491,21 @@ export const make = Effect.gen(function* () {
               .message({ threadId, ordinal: 1 })
               .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId))));
           const dispatched = yield* threads
-            .dispatch({
-              type: "message.dispatch",
-              commandId: messageCommandId,
-              threadId,
-              messageId,
-              text: input.initialMessage.text,
-              attachments: input.initialMessage.attachments,
-              modelSelection: input.modelSelection,
-              dispatchMode: { type: "defer_start" },
-              createdBy: input.createdBy,
-              creationSource: input.creationSource,
-            })
+            .dispatch(
+              {
+                type: "message.dispatch",
+                commandId: messageCommandId,
+                threadId,
+                messageId,
+                text: input.initialMessage.text,
+                attachments: input.initialMessage.attachments,
+                modelSelection: input.modelSelection,
+                dispatchMode: { type: "defer_start" },
+                createdBy: input.createdBy,
+                creationSource: input.creationSource,
+              },
+              input.dispatchOptions,
+            )
             .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId)));
           const runCreated = dispatched.storedEvents.find(
             (stored) => stored.event.type === "run.created",

@@ -7,6 +7,7 @@ import {
   type Project,
   ProjectId,
   ProviderInstanceId,
+  ProviderSessionId,
   ThreadId,
   WorktreeMcpHandoffInput,
 } from "@t3tools/contracts";
@@ -33,6 +34,10 @@ import {
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import {
+  RuntimeMutationAuthorityError,
+  RuntimeMutationAuthorityGuard,
+} from "../supervisor/SupervisorAuthority.ts";
 import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
 import { layer as worktreeMcpServiceLayer, WorktreeMcpService } from "./WorktreeMcpService.ts";
@@ -48,6 +53,7 @@ const makeScope = (
   environmentId,
   threadId,
   providerSessionId: "provider-session-worktree-test",
+  runtimeProviderSessionId: ProviderSessionId.make("runtime-provider-session-worktree-test"),
   providerInstanceId: ProviderInstanceId.make("claudeAgent"),
   capabilities,
   issuedAt: 1,
@@ -110,21 +116,31 @@ interface HarnessOptions {
   readonly resolveRemoteFails?: boolean;
   readonly removeWorktreeFails?: boolean;
   readonly createWorktreeGate?: Effect.Effect<void>;
+  readonly authorityFailsAtCall?: number;
+  readonly authorityLostAtDispatch?: boolean;
 }
 
 const makeHarness = (options: HarnessOptions = {}) => {
   const thread = options.thread === undefined ? {} : options.thread;
   const scope = makeScope(options.capabilities ?? new Set(["preview", "worktree"]));
-  const dispatch = vi.fn((_: unknown) =>
+  const dispatch = vi.fn((_: unknown, __: unknown) =>
     (options.dispatchGate ?? Effect.void).pipe(
       Effect.andThen(
-        options.dispatchInterrupts
-          ? (Effect.failCause(Cause.interrupt()) as never)
-          : options.dispatchDies
-            ? Effect.die(new Error("dispatch defect"))
-            : options.dispatchFails
-              ? (Effect.fail("simulated dispatch failure") as never)
-              : Effect.succeed({ sequence: 1, storedEvents: [] }),
+        options.authorityLostAtDispatch
+          ? (Effect.fail(
+              new RuntimeMutationAuthorityError({
+                threadId: scope.threadId,
+                runtimeProviderSessionId: scope.runtimeProviderSessionId,
+                providerInstanceId: scope.providerInstanceId,
+              }),
+            ) as never)
+          : options.dispatchInterrupts
+            ? (Effect.failCause(Cause.interrupt()) as never)
+            : options.dispatchDies
+              ? Effect.die(new Error("dispatch defect"))
+              : options.dispatchFails
+                ? (Effect.fail("simulated dispatch failure") as never)
+                : Effect.succeed({ sequence: 1, storedEvents: [] }),
       ),
     ),
   );
@@ -201,6 +217,20 @@ const makeHarness = (options: HarnessOptions = {}) => {
       ? (Effect.fail("simulated worktree removal failure") as never)
       : Effect.void,
   );
+  const deleteLocalBranch = vi.fn((_: unknown) => Effect.void);
+  let authorityCalls = 0;
+  const requireAuthority = vi.fn(() => {
+    authorityCalls += 1;
+    return authorityCalls === options.authorityFailsAtCall
+      ? Effect.fail(
+          new RuntimeMutationAuthorityError({
+            threadId: scope.threadId,
+            runtimeProviderSessionId: scope.runtimeProviderSessionId,
+            providerInstanceId: scope.providerInstanceId,
+          }),
+        )
+      : Effect.void;
+  });
   const fetchRemote = vi.fn((_: unknown) =>
     options.fetchRemoteFails ? (Effect.fail("simulated fetch failure") as never) : Effect.void,
   );
@@ -317,6 +347,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
           resolveRemoteTrackingCommit,
           createWorktree,
           removeWorktree,
+          deleteLocalBranch,
         } satisfies Partial<GitWorkflowService.GitWorkflowService["Service"]>),
         Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
           runForThread,
@@ -324,6 +355,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
         Layer.mock(VcsStatusBroadcaster)({
           refreshStatus,
         } satisfies Partial<VcsStatusBroadcaster["Service"]>),
+        Layer.mock(RuntimeMutationAuthorityGuard)({ require: requireAuthority }),
         NodeServices.layer,
       ),
     ),
@@ -338,6 +370,8 @@ const makeHarness = (options: HarnessOptions = {}) => {
     resolveRemoteTrackingCommit,
     createWorktree,
     removeWorktree,
+    deleteLocalBranch,
+    requireAuthority,
     localStatus,
     runForThread,
   };
@@ -404,6 +438,16 @@ describe("t3_worktree_handoff", () => {
           branch: "feature/handoff",
           worktreePath: "/worktrees/project/feature/handoff",
         }),
+        {
+          runtimeAuthority: {
+            threadId,
+            runtimeProviderSessionId: ProviderSessionId.make(
+              "runtime-provider-session-worktree-test",
+            ),
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            runtimeGeneration: 0,
+          },
+        },
       );
       expect(harness.runForThread).toHaveBeenCalledWith({
         threadId,
@@ -523,6 +567,30 @@ describe("t3_worktree_handoff", () => {
       expect(result.worktreePath).toBe("/custom/worktree/location");
       expect(result.startedFromOrigin).toBe(true);
       expect(result.setupScript).toEqual({ status: "skipped" });
+    });
+  });
+
+  it.effect("rejects stale runtime authority before fetching origin", () => {
+    const harness = makeHarness({ authorityFailsAtCall: 1 });
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(
+        runHandoff(harness, { branch: "feature/stale-before-fetch", startFromOrigin: true }),
+      );
+      expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "capability_denied" });
+      expect(harness.fetchRemote).not.toHaveBeenCalled();
+      expect(harness.createWorktree).not.toHaveBeenCalled();
+    });
+  });
+
+  it.effect("rechecks runtime authority after fetch before creating the worktree", () => {
+    const harness = makeHarness({ authorityFailsAtCall: 2 });
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(
+        runHandoff(harness, { branch: "feature/takeover-during-fetch", startFromOrigin: true }),
+      );
+      expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "capability_denied" });
+      expect(harness.fetchRemote).toHaveBeenCalledTimes(1);
+      expect(harness.createWorktree).not.toHaveBeenCalled();
     });
   });
 
@@ -708,6 +776,30 @@ describe("t3_worktree_handoff", () => {
         cwd: workspaceRoot,
         path: "/worktrees/project/feature/dispatch-defect",
         force: true,
+      });
+      expect(harness.deleteLocalBranch).toHaveBeenCalledWith({
+        cwd: workspaceRoot,
+        branch: "feature/dispatch-defect",
+      });
+    });
+  });
+
+  it.effect("removes the worktree and branch when authority changes during creation", () => {
+    const harness = makeHarness({ authorityLostAtDispatch: true });
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(
+        runHandoff(harness, { branch: "feature/takeover-during-create" }),
+      );
+      expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "operation_failed" });
+      expect(harness.createWorktree).toHaveBeenCalledTimes(1);
+      expect(harness.removeWorktree).toHaveBeenCalledWith({
+        cwd: workspaceRoot,
+        path: "/worktrees/project/feature/takeover-during-create",
+        force: true,
+      });
+      expect(harness.deleteLocalBranch).toHaveBeenCalledWith({
+        cwd: workspaceRoot,
+        branch: "feature/takeover-during-create",
       });
     });
   });

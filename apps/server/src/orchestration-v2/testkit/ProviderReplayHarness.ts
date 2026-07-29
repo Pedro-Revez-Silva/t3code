@@ -36,7 +36,13 @@ import { layer as projectionStoreLayer } from "../ProjectionStore.ts";
 import { OrchestratorV2, type OrchestratorV2Error } from "../Orchestrator.ts";
 import { ProviderAdapterRegistryV2 } from "../ProviderAdapterRegistry.ts";
 import { layer as providerEventIngestorLayer } from "../ProviderEventIngestor.ts";
+import {
+  layer as providerRuntimeRecoveryLayer,
+  ProviderRuntimeRecoveryService,
+} from "../ProviderRuntimeRecoveryService.ts";
 import { layerWithOptions as providerSessionManagerLayerWithOptions } from "../ProviderSessionManager.ts";
+import { layer as providerSessionGenerationStoreLayer } from "../ProviderSessionGenerationStore.ts";
+import { layer as providerOwnershipGuardLayer } from "../ProviderOwnershipGuard.ts";
 import { layer as providerSwitchServiceLayer } from "../ProviderSwitchService.ts";
 import { layer as providerTurnControlServiceLayer } from "../ProviderTurnControlService.ts";
 import { layer as providerTurnStartServiceLayer } from "../ProviderTurnStartService.ts";
@@ -200,7 +206,10 @@ export function makeOrchestratorV2ProviderReplayLayer<
     readonly enableAssistantStreaming?: boolean;
     readonly runEffectWorker?: boolean;
   } = {},
-): Layer.Layer<OrchestratorV2, Error | MigrationError | PlatformError.PlatformError | SqlError> {
+): Layer.Layer<
+  OrchestratorV2 | ProviderRuntimeRecoveryService,
+  Error | MigrationError | PlatformError.PlatformError | SqlError
+> {
   const registryLayer = harness.makeProviderAdapterRegistryLayer(scenario.transcript);
   return makeOrchestratorV2ReplayLayerWithRegistry(scenario, registryLayer, options);
 }
@@ -216,7 +225,10 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
     readonly enableAssistantStreaming?: boolean;
     readonly runEffectWorker?: boolean;
   } = {},
-): Layer.Layer<OrchestratorV2, Error | MigrationError | PlatformError.PlatformError | SqlError> {
+): Layer.Layer<
+  OrchestratorV2 | ProviderRuntimeRecoveryService,
+  Error | MigrationError | PlatformError.PlatformError | SqlError
+> {
   const serverConfigLayer = Layer.effect(
     ServerConfig,
     makeReplayServerConfig(scenario.name).pipe(Effect.orDie),
@@ -242,8 +254,19 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
     Layer.provide(Layer.mergeAll(storesLayer, databaseLayer)),
   );
   const commandReceiptStoreProvided = commandReceiptStoreLayer.pipe(Layer.provide(databaseLayer));
+  const providerSessionGenerationStoreProvided = providerSessionGenerationStoreLayer.pipe(
+    Layer.provide(databaseLayer),
+  );
+  const providerOwnershipGuardProvided = providerOwnershipGuardLayer;
   const providerEventIngestorProvided = providerEventIngestorLayer.pipe(
-    Layer.provide(Layer.mergeAll(storesLayer, eventSinkProvided, idAllocatorLayer)),
+    Layer.provide(
+      Layer.mergeAll(
+        storesLayer,
+        eventSinkProvided,
+        idAllocatorLayer,
+        providerSessionGenerationStoreProvided,
+      ),
+    ),
   );
   const vcsDriverRegistryLayer = VcsDriverRegistry.layer.pipe(
     Layer.provide(VcsProcess.layer),
@@ -276,6 +299,8 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
         eventSinkProvided,
         idAllocatorLayer,
         mcpSessionRegistryTestLayer,
+        providerOwnershipGuardProvided,
+        providerSessionGenerationStoreProvided,
         storesLayer,
       ),
     ),
@@ -302,6 +327,7 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
         idAllocatorLayer,
         storesLayer,
         providerSessionManagerProvided,
+        providerSessionGenerationStoreProvided,
         runExecutionServiceProvided,
         runtimeLayer,
       ),
@@ -311,7 +337,14 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
     Layer.provide(Layer.merge(storesLayer, providerSessionManagerProvided)),
   );
   const runtimeRequestServiceProvided = runtimeRequestServiceLayer.pipe(
-    Layer.provide(Layer.merge(storesLayer, providerSessionManagerProvided)),
+    Layer.provide(
+      Layer.mergeAll(
+        eventSinkProvided,
+        idAllocatorLayer,
+        storesLayer,
+        providerSessionManagerProvided,
+      ),
+    ),
   );
   const checkpointRollbackServiceProvided = checkpointRollbackServiceLayer.pipe(
     Layer.provide(
@@ -320,7 +353,9 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
         eventSinkProvided,
         idAllocatorLayer,
         storesLayer,
+        providerOwnershipGuardProvided,
         providerSessionManagerProvided,
+        providerSessionGenerationStoreProvided,
         runtimeLayer,
       ),
     ),
@@ -359,26 +394,46 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
         registryLayer,
         runtimeLayer,
         providerSessionManagerProvided,
+        providerSessionGenerationStoreProvided,
         providerSwitchServiceProvided,
         runExecutionServiceProvided,
         threadForkServiceLayer,
       ),
     ),
   );
-  const replayRuntime = Layer.merge(orchestratorProvided, effectWorkerProvided);
+  const recoveryProvided = providerRuntimeRecoveryLayer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        orchestratorProvided,
+        effectWorkerProvided,
+        persistenceLayer,
+        storesLayer,
+        providerSessionManagerProvided,
+        providerTurnControlServiceProvided,
+      ),
+    ),
+  );
+  const replayRuntime = Layer.mergeAll(
+    orchestratorProvided,
+    effectWorkerProvided,
+    recoveryProvided,
+  );
 
   // Build the daemon from the exact worker instance exposed alongside the
   // orchestrator. Keeping this acquisition in the replay layer makes the
   // outbox lifecycle explicit and prevents test-only command-side draining.
   if (options.runEffectWorker === false) {
-    return orchestratorProvided;
+    return Layer.merge(orchestratorProvided, recoveryProvided);
   }
-  return Layer.effect(
-    OrchestratorV2,
-    Effect.gen(function* () {
-      const orchestrator = yield* OrchestratorV2;
-      yield* runEffectWorkerDaemon.pipe(Effect.forkScoped);
-      return orchestrator;
-    }),
-  ).pipe(Layer.provide(replayRuntime));
+  return Layer.merge(
+    Layer.effect(
+      OrchestratorV2,
+      Effect.gen(function* () {
+        const orchestrator = yield* OrchestratorV2;
+        yield* runEffectWorkerDaemon.pipe(Effect.forkScoped);
+        return orchestrator;
+      }),
+    ).pipe(Layer.provide(replayRuntime)),
+    recoveryProvided,
+  );
 }

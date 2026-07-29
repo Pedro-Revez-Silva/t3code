@@ -87,6 +87,13 @@ export function assertSubagentV2NestedOutput(
   assert.lengthOf(firstProjection.runs, 0);
   assert.lengthOf(firstProjection.providerTurns, 1);
   assertTurnItemTypes(firstProjection, ["subagent", "assistant_message"]);
+  const firstProviderThread = rootProjection.providerThreads.find(
+    (providerThread) => providerThread.id === first.providerThreadId,
+  );
+  assert.equal(
+    firstProviderThread?.forkedFrom?.providerThreadId,
+    rootProjection.runs[0]?.providerThreadId,
+  );
 
   const second = assertCompletedProviderNativeSubagent({
     projection: firstProjection,
@@ -104,6 +111,10 @@ export function assertSubagentV2NestedOutput(
   assert.lengthOf(secondProjection.runs, 0);
   assert.lengthOf(secondProjection.providerTurns, 1);
   assertTurnItemTypes(secondProjection, ["subagent", "assistant_message"]);
+  const secondProviderThread = firstProjection.providerThreads.find(
+    (providerThread) => providerThread.id === second.providerThreadId,
+  );
+  assert.equal(secondProviderThread?.forkedFrom?.providerThreadId, first.providerThreadId);
 
   const third = assertCompletedProviderNativeSubagent({
     projection: secondProjection,
@@ -122,6 +133,10 @@ export function assertSubagentV2NestedOutput(
   assert.lengthOf(thirdProjection.providerTurns, 1);
   assert.lengthOf(thirdProjection.subagents, 0);
   assertTurnItemTypes(thirdProjection, ["assistant_message"]);
+  const thirdProviderThread = secondProjection.providerThreads.find(
+    (providerThread) => providerThread.id === third.providerThreadId,
+  );
+  assert.equal(thirdProviderThread?.forkedFrom?.providerThreadId, second.providerThreadId);
   assert.isTrue(
     thirdProjection.turnItems.some(
       (item) => item.type === "assistant_message" && item.text === "Hello.",

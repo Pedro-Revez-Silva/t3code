@@ -1,6 +1,6 @@
 import * as NetService from "@t3tools/shared/Net";
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
-import { DesktopBackendBootstrap, PortSchema } from "@t3tools/contracts";
+import { DesktopBackendBootstrap, PortSchema, ThreadId } from "@t3tools/contracts";
 import * as Config from "effect/Config";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -129,6 +129,16 @@ const EnvServerConfig = Config.all({
   tailscaleServePort: Config.port("T3CODE_TAILSCALE_SERVE_PORT").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
+  ),
+  experimentalGlobalSupervisorThreadId: Config.string(
+    "T3CODE_EXPERIMENTAL_GLOBAL_SUPERVISOR_THREAD_ID",
+  ).pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+    Config.map((value) => {
+      const normalized = value?.trim();
+      return normalized ? ThreadId.make(normalized) : undefined;
+    }),
   ),
 });
 
@@ -370,6 +380,9 @@ export const resolveServerConfig = (
       logWebSocketEvents,
       tailscaleServeEnabled,
       tailscaleServePort,
+      ...(env.experimentalGlobalSupervisorThreadId === undefined
+        ? {}
+        : { experimentalGlobalSupervisorThreadId: env.experimentalGlobalSupervisorThreadId }),
     };
 
     return config;

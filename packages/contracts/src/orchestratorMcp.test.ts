@@ -5,9 +5,11 @@ import {
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpProjectListResult,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadListInput,
   OrchestratorMcpThreadReadInput,
+  OrchestratorMcpThreadRespondInput,
   OrchestratorMcpThreadSendInput,
   OrchestratorMcpThreadStartInput,
   OrchestratorMcpThreadWaitInput,
@@ -16,9 +18,11 @@ import {
 const decodeCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput);
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
 const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskResult);
+const decodeProjectListResult = Schema.decodeUnknownSync(OrchestratorMcpProjectListResult);
 const decodeThreadInterruptInput = Schema.decodeUnknownSync(OrchestratorMcpThreadInterruptInput);
 const decodeThreadListInput = Schema.decodeUnknownSync(OrchestratorMcpThreadListInput);
 const decodeThreadReadInput = Schema.decodeUnknownSync(OrchestratorMcpThreadReadInput);
+const decodeThreadRespondInput = Schema.decodeUnknownSync(OrchestratorMcpThreadRespondInput);
 const decodeThreadSendInput = Schema.decodeUnknownSync(OrchestratorMcpThreadSendInput);
 const decodeThreadStartInput = Schema.decodeUnknownSync(OrchestratorMcpThreadStartInput);
 const decodeThreadWaitInput = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitInput);
@@ -26,6 +30,7 @@ const decodeThreadWaitInput = Schema.decodeUnknownSync(OrchestratorMcpThreadWait
 describe("orchestrator MCP contracts", () => {
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({
+      projectId: "project-worker",
       task: "Inspect the workspace and report the result.",
       target: {
         providerInstanceId: "claudeAgent",
@@ -51,6 +56,7 @@ describe("orchestrator MCP contracts", () => {
     });
 
     expect(request.target?.providerInstanceId).toBe("claudeAgent");
+    expect(request.projectId).toBe("project-worker");
     expect(result.status).toBe("completed");
     expect(result.summary).toBe("Workspace inspected.");
   });
@@ -122,15 +128,23 @@ describe("orchestrator MCP contracts", () => {
     expect(request.threads[1]?.target?.driverKind).toBe("claudeAgent");
   });
 
-  it("decodes project-scoped thread orchestration requests", () => {
+  it("decodes optional project selectors for thread orchestration requests", () => {
     expect(
       decodeThreadStartInput({
+        projectId: "project-worker",
         prompt: "Run the first loop iteration.",
         clientRequestId: "start-loop-1",
       }).prompt,
     ).toBe("Run the first loop iteration.");
     expect(
+      decodeProjectListResult({
+        currentProjectId: "project-current",
+        projects: [{ projectId: "project-worker", title: "Worker project" }],
+      }).projects[0]?.projectId,
+    ).toBe("project-worker");
+    expect(
       decodeThreadListInput({
+        projectId: "project-worker",
         statuses: ["running", "completed"],
         includeSubagents: false,
         limit: 25,
@@ -138,6 +152,7 @@ describe("orchestrator MCP contracts", () => {
     ).toEqual(["running", "completed"]);
     expect(
       decodeThreadReadInput({
+        projectId: "project-worker",
         threadId: "thread-loop-1",
         view: "activity",
         afterPosition: 10,
@@ -145,6 +160,7 @@ describe("orchestrator MCP contracts", () => {
     ).toBe(10);
     expect(
       decodeThreadSendInput({
+        projectId: "project-worker",
         threadId: "thread-loop-1",
         message: "Continue with the next iteration.",
         mode: "steer",
@@ -153,6 +169,7 @@ describe("orchestrator MCP contracts", () => {
     ).toBe("steer");
     expect(
       decodeThreadWaitInput({
+        projectId: "project-worker",
         threadId: "thread-loop-1",
         runId: "run-loop-2",
         timeoutMs: 5_000,
@@ -160,9 +177,26 @@ describe("orchestrator MCP contracts", () => {
     ).toBe("run-loop-2");
     expect(
       decodeThreadInterruptInput({
+        projectId: "project-worker",
         threadId: "thread-loop-1",
         reason: "Loop converged.",
       }).reason,
     ).toBe("Loop converged.");
+    expect(
+      decodeThreadRespondInput({
+        projectId: "project-worker",
+        threadId: "thread-loop-1",
+        requestId: "request-loop-1",
+        answers: { environment: "staging", retries: 2 },
+        clientRequestId: "respond-loop-1",
+      }).answers,
+    ).toEqual({ environment: "staging", retries: 2 });
+    expect(
+      decodeThreadRespondInput({
+        threadId: "thread-loop-1",
+        requestId: "request-loop-2",
+        decision: "acceptForSession",
+      }).decision,
+    ).toBe("acceptForSession");
   });
 });

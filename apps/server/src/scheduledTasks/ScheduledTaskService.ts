@@ -30,6 +30,10 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import {
+  requireRuntimeMutationAuthority,
+  type RuntimeMutationAuthority,
+} from "../supervisor/SupervisorAuthority.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
 
 const decodeTask = Schema.decodeUnknownEffect(ScheduledTask);
@@ -74,13 +78,16 @@ export class ScheduledTaskService extends Context.Service<
     readonly subscribeList: () => Stream.Stream<ScheduledTaskListResult, ScheduledTaskError>;
     readonly upsert: (
       input: ScheduledTaskUpsertInput,
+      authority?: RuntimeMutationAuthority,
     ) => Effect.Effect<ScheduledTaskMutationResult, ScheduledTaskError>;
     /** Partial update flipping only the enabled flag; never touches other fields. */
     readonly setEnabled: (
       input: ScheduledTaskSetEnabledInput,
+      authority?: RuntimeMutationAuthority,
     ) => Effect.Effect<ScheduledTaskMutationResult, ScheduledTaskError>;
     readonly delete: (
       input: ScheduledTaskDeleteInput,
+      authority?: RuntimeMutationAuthority,
     ) => Effect.Effect<ScheduledTaskDeleteResult, ScheduledTaskError>;
     readonly runNow: (
       input: ScheduledTaskRunNowInput,
@@ -688,93 +695,145 @@ export const layer = Layer.effect(
         }),
       );
 
-    const upsert: ScheduledTaskService["Service"]["upsert"] = (input) =>
+    const upsert: ScheduledTaskService["Service"]["upsert"] = (input, authority) =>
       Effect.gen(function* () {
-        const now = yield* localNow;
-        const uuid =
-          input.commandId === undefined
-            ? yield* crypto.randomUUIDv4.pipe(
-                Effect.mapError((cause) =>
-                  taskError("Could not generate schedule task id.", { cause }),
-                ),
-              )
-            : null;
-        const id =
-          input.id ??
-          ScheduledTaskId.make(
-            input.commandId ? `scheduled-task:${input.commandId}` : `scheduled-task:${uuid}`,
+        const task = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              if (authority !== undefined) {
+                yield* requireRuntimeMutationAuthority(sql, authority).pipe(
+                  Effect.mapError((cause) =>
+                    taskError("MCP runtime ownership changed.", { cause }),
+                  ),
+                );
+              }
+              const now = yield* localNow;
+              const uuid =
+                input.commandId === undefined
+                  ? yield* crypto.randomUUIDv4.pipe(
+                      Effect.mapError((cause) =>
+                        taskError("Could not generate schedule task id.", { cause }),
+                      ),
+                    )
+                  : null;
+              const id =
+                input.id ??
+                ScheduledTaskId.make(
+                  input.commandId ? `scheduled-task:${input.commandId}` : `scheduled-task:${uuid}`,
+                );
+              const existingTask = yield* findTask(id);
+              const scheduleUnchanged =
+                existingTask !== null &&
+                existingTask.enabled === input.enabled &&
+                isSameSchedule(existingTask.schedule, input.schedule);
+              const task: ScheduledTask = {
+                id,
+                title: input.title,
+                prompt: input.prompt,
+                enabled: input.enabled,
+                schedule: input.schedule,
+                projectId: input.projectId,
+                threadId: input.threadId ?? null,
+                workspaceStrategy: input.workspaceStrategy,
+                modelSelection: input.modelSelection,
+                runtimeMode: input.runtimeMode,
+                interactionMode: input.interactionMode,
+                createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
+                creationSource: input.creationSource ?? "web",
+                createdAt: existingTask?.createdAt ?? iso(now),
+                updatedAt: iso(now),
+                nextRunAt: scheduleUnchanged
+                  ? existingTask.nextRunAt
+                  : nextRunAt({ enabled: input.enabled, schedule: input.schedule }, now),
+                lastRunAt: existingTask?.lastRunAt ?? null,
+                lastRunStatus: existingTask?.lastRunStatus ?? "never",
+                lastRunError: existingTask?.lastRunError ?? null,
+                runCount: existingTask?.runCount ?? 0,
+              };
+              yield* saveTask(task);
+              return task;
+            }),
+          )
+          .pipe(
+            Effect.mapError((cause) =>
+              cause._tag === "ScheduledTaskError"
+                ? cause
+                : taskError("Could not save schedule task.", { cause }),
+            ),
           );
-        // Look up by the *resolved* id so idempotent creates (commandId replays)
-        // keep their run history, and so real load failures propagate instead
-        // of silently resetting an existing row.
-        const existingTask = yield* findTask(id);
-        // Keep the existing next_run_at when the schedule itself is untouched:
-        // editing a title or prompt must not postpone (or resurrect) a due
-        // run — only schedule/enabled changes restart the clock.
-        const scheduleUnchanged =
-          existingTask !== null &&
-          existingTask.enabled === input.enabled &&
-          isSameSchedule(existingTask.schedule, input.schedule);
-        const task: ScheduledTask = {
-          id,
-          title: input.title,
-          prompt: input.prompt,
-          enabled: input.enabled,
-          schedule: input.schedule,
-          projectId: input.projectId,
-          threadId: input.threadId ?? null,
-          workspaceStrategy: input.workspaceStrategy,
-          modelSelection: input.modelSelection,
-          runtimeMode: input.runtimeMode,
-          interactionMode: input.interactionMode,
-          createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
-          creationSource: input.creationSource ?? "web",
-          createdAt: existingTask?.createdAt ?? iso(now),
-          updatedAt: iso(now),
-          nextRunAt: scheduleUnchanged
-            ? existingTask.nextRunAt
-            : nextRunAt({ enabled: input.enabled, schedule: input.schedule }, now),
-          lastRunAt: existingTask?.lastRunAt ?? null,
-          lastRunStatus: existingTask?.lastRunStatus ?? "never",
-          lastRunError: existingTask?.lastRunError ?? null,
-          runCount: existingTask?.runCount ?? 0,
-        };
-        yield* saveTask(task);
         yield* notifyChanged;
         return { task };
       });
 
-    const setEnabled: ScheduledTaskService["Service"]["setEnabled"] = (input) =>
+    const setEnabled: ScheduledTaskService["Service"]["setEnabled"] = (input, authority) =>
       Effect.gen(function* () {
-        const existing = yield* loadTask(input.id);
-        if (existing.enabled === input.enabled) return { task: existing };
-        const now = yield* localNow;
-        const next = nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now);
-        // RETURNING so a task deleted between the load and this UPDATE is a
-        // visible not-found error, not a false success.
-        const updated = yield* sql<{ task_id: string }>`
-          UPDATE scheduled_tasks
-          SET enabled = ${input.enabled ? 1 : 0},
-              next_run_at = ${next},
-              updated_at = ${iso(now)}
-          WHERE task_id = ${input.id}
-          RETURNING task_id
-        `.pipe(
-          Effect.mapError((cause) =>
-            taskError("Could not update schedule task.", { taskId: input.id, cause }),
-          ),
-        );
-        if (updated.length === 0) {
-          return yield* taskError("Schedule task not found.", { taskId: input.id });
-        }
-        yield* notifyChanged;
-        return {
-          task: { ...existing, enabled: input.enabled, nextRunAt: next, updatedAt: iso(now) },
-        };
+        const result = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              if (authority !== undefined) {
+                yield* requireRuntimeMutationAuthority(sql, authority).pipe(
+                  Effect.mapError((cause) =>
+                    taskError("MCP runtime ownership changed.", { cause }),
+                  ),
+                );
+              }
+              const existing = yield* loadTask(input.id);
+              if (existing.enabled === input.enabled) return { task: existing, changed: false };
+              const now = yield* localNow;
+              const next = nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now);
+              const updated = yield* sql<{ task_id: string }>`
+              UPDATE scheduled_tasks
+              SET enabled = ${input.enabled ? 1 : 0},
+                  next_run_at = ${next},
+                  updated_at = ${iso(now)}
+              WHERE task_id = ${input.id}
+              RETURNING task_id
+            `.pipe(
+                Effect.mapError((cause) =>
+                  taskError("Could not update schedule task.", { taskId: input.id, cause }),
+                ),
+              );
+              if (updated.length === 0) {
+                return yield* taskError("Schedule task not found.", { taskId: input.id });
+              }
+              return {
+                task: { ...existing, enabled: input.enabled, nextRunAt: next, updatedAt: iso(now) },
+                changed: true,
+              };
+            }),
+          )
+          .pipe(
+            Effect.mapError((cause) =>
+              cause._tag === "ScheduledTaskError"
+                ? cause
+                : taskError("Could not update schedule task.", { taskId: input.id, cause }),
+            ),
+          );
+        if (result.changed) yield* notifyChanged;
+        return { task: result.task };
       });
 
-    const deleteTask: ScheduledTaskService["Service"]["delete"] = (input) =>
-      deleteRow(input.id).pipe(Effect.andThen(notifyChanged), Effect.as({ id: input.id }));
+    const deleteTask: ScheduledTaskService["Service"]["delete"] = (input, authority) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            if (authority !== undefined) {
+              yield* requireRuntimeMutationAuthority(sql, authority).pipe(
+                Effect.mapError((cause) => taskError("MCP runtime ownership changed.", { cause })),
+              );
+            }
+            yield* deleteRow(input.id);
+          }),
+        )
+        .pipe(
+          Effect.mapError((cause) =>
+            cause._tag === "ScheduledTaskError"
+              ? cause
+              : taskError("Could not delete schedule task.", { taskId: input.id, cause }),
+          ),
+          Effect.andThen(notifyChanged),
+          Effect.as({ id: input.id }),
+        );
 
     const runNow: ScheduledTaskService["Service"]["runNow"] = (input: ScheduledTaskRunNowInput) =>
       Effect.gen(function* () {

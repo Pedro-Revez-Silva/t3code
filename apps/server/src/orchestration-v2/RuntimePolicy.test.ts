@@ -54,25 +54,29 @@ function makeThread(input: {
   };
 }
 
-const TestLayer = layerFromProjectRepository.pipe(
-  Layer.provide(
-    Layer.mock(ProjectionProjects.ProjectionProjectRepository)({
-      getById: () =>
-        Effect.succeed(
-          Option.some({
-            projectId,
-            title: "Project",
-            workspaceRoot: "/project-root",
-            defaultModelSelection: null,
-            scripts: [],
-            createdAt: "2026-06-21T00:00:00.000Z",
-            updatedAt: "2026-06-21T00:00:00.000Z",
-            deletedAt: null,
-          }),
-        ),
-    }),
-  ),
-);
+function makeTestLayer(input?: { readonly workspaceRoot?: string; readonly deletedAt?: string }) {
+  return layerFromProjectRepository.pipe(
+    Layer.provide(
+      Layer.mock(ProjectionProjects.ProjectionProjectRepository)({
+        getById: () =>
+          Effect.succeed(
+            Option.some({
+              projectId,
+              title: "Project",
+              workspaceRoot: input?.workspaceRoot ?? "/project-root",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: "2026-06-21T00:00:00.000Z",
+              updatedAt: "2026-06-21T00:00:00.000Z",
+              deletedAt: input?.deletedAt ?? null,
+            }),
+          ),
+      }),
+    ),
+  );
+}
+
+const TestLayer = makeTestLayer();
 
 it.layer(TestLayer)("RuntimePolicyV2", (it) => {
   it.effect("uses the project root for local-checkout threads", () =>
@@ -99,3 +103,41 @@ it.layer(TestLayer)("RuntimePolicyV2", (it) => {
     }),
   );
 });
+
+it.layer(makeTestLayer({ deletedAt: "2026-06-22T00:00:00.000Z" }))(
+  "RuntimePolicyV2 deleted project validation",
+  (it) => {
+    it.effect("rejects a deleted project before using a provisioned worktree", () =>
+      Effect.gen(function* () {
+        const policy = yield* RuntimePolicyV2;
+        const now = yield* DateTime.now;
+        const exit = yield* Effect.exit(
+          policy.resolve({
+            thread: makeThread({ now, worktreePath: "/project-worktree" }),
+            modelSelection,
+          }),
+        );
+        assert.equal(exit._tag, "Failure");
+      }),
+    );
+  },
+);
+
+it.layer(makeTestLayer({ workspaceRoot: "   " }))(
+  "RuntimePolicyV2 workspace root validation",
+  (it) => {
+    it.effect("rejects a blank project root before using a provisioned worktree", () =>
+      Effect.gen(function* () {
+        const policy = yield* RuntimePolicyV2;
+        const now = yield* DateTime.now;
+        const exit = yield* Effect.exit(
+          policy.resolve({
+            thread: makeThread({ now, worktreePath: "/project-worktree" }),
+            modelSelection,
+          }),
+        );
+        assert.equal(exit._tag, "Failure");
+      }),
+    );
+  },
+);

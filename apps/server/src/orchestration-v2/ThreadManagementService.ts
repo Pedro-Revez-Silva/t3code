@@ -26,6 +26,7 @@ import * as Schema from "effect/Schema";
 
 import {
   OrchestratorV2,
+  type OrchestratorV2DispatchOptions,
   type OrchestratorV2DispatchResult,
   type OrchestratorV2Error,
 } from "./Orchestrator.ts";
@@ -70,6 +71,7 @@ export interface ThreadManagementSendInput {
   readonly mode: ThreadManagementSendMode;
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  readonly dispatchOptions?: OrchestratorV2DispatchOptions;
 }
 
 export interface ThreadManagementSendResult {
@@ -101,6 +103,7 @@ export interface ThreadManagementInterruptInput {
   readonly threadId: ThreadId;
   readonly runId?: RunId;
   readonly reason?: string;
+  readonly dispatchOptions?: OrchestratorV2DispatchOptions;
 }
 
 export type ThreadManagementInterruptResult =
@@ -136,6 +139,7 @@ export interface ThreadManagementServiceShape {
   readonly ensureLegacyTranscript: (threadId: ThreadId) => Effect.Effect<void>;
   readonly dispatch: (
     command: OrchestrationV2Command,
+    options?: OrchestratorV2DispatchOptions,
   ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
   readonly getThreadProjection: (
     threadId: ThreadId,
@@ -258,7 +262,7 @@ const make = Effect.gen(function* () {
   const getThreadSnapshot: ThreadManagementServiceShape["getThreadSnapshot"] = (threadId) =>
     ensureLegacyTranscript(threadId).pipe(Effect.andThen(orchestrator.getThreadSnapshot(threadId)));
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = (command) => {
+  const dispatch: ThreadManagementServiceShape["dispatch"] = (command, options) => {
     const threadId =
       command.type === "message.dispatch"
         ? command.threadId
@@ -266,8 +270,10 @@ const make = Effect.gen(function* () {
           ? command.sourceThreadId
           : undefined;
     return threadId === undefined
-      ? orchestrator.dispatch(command)
-      : ensureLegacyTranscript(threadId).pipe(Effect.andThen(orchestrator.dispatch(command)));
+      ? orchestrator.dispatch(command, options)
+      : ensureLegacyTranscript(threadId).pipe(
+          Effect.andThen(orchestrator.dispatch(command, options)),
+        );
   };
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>
@@ -349,18 +355,21 @@ const make = Effect.gen(function* () {
         };
       }
 
-      const dispatch = yield* orchestrator.dispatch({
-        type: "message.dispatch",
-        commandId: input.commandId,
-        threadId: input.threadId,
-        messageId: input.messageId,
-        text: input.text,
-        attachments: input.attachments,
-        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-        dispatchMode,
-        createdBy: input.createdBy,
-        creationSource: input.creationSource,
-      });
+      const dispatch = yield* orchestrator.dispatch(
+        {
+          type: "message.dispatch",
+          commandId: input.commandId,
+          threadId: input.threadId,
+          messageId: input.messageId,
+          text: input.text,
+          attachments: input.attachments,
+          ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+          dispatchMode,
+          createdBy: input.createdBy,
+          creationSource: input.creationSource,
+        },
+        input.dispatchOptions,
+      );
       const projection = yield* getProjectThread(input);
       const message = projection.messages.find((candidate) => candidate.id === input.messageId);
       const run =
@@ -473,13 +482,16 @@ const make = Effect.gen(function* () {
           `Run ${explicitRun?.id ?? input.runId} is not currently interruptible.`,
         );
       }
-      const dispatch = yield* orchestrator.dispatch({
-        type: "run.interrupt",
-        commandId: input.commandId,
-        threadId: input.threadId,
-        runId: interruptibleRun.id,
-        ...(input.reason === undefined ? {} : { reason: input.reason }),
-      });
+      const dispatch = yield* orchestrator.dispatch(
+        {
+          type: "run.interrupt",
+          commandId: input.commandId,
+          threadId: input.threadId,
+          runId: interruptibleRun.id,
+          ...(input.reason === undefined ? {} : { reason: input.reason }),
+        },
+        input.dispatchOptions,
+      );
       return { type: "interrupt_requested", run: interruptibleRun, dispatch } as const;
     });
 

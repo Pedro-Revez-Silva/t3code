@@ -290,6 +290,69 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       }),
   );
 
+  it.effect("continues reading messages while a server request awaits its response", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const requestStarted = yield* Deferred.make<void>();
+      const releaseRequest = yield* Deferred.make<void>();
+      const notificationReceived = yield* Deferred.make<void>();
+
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        onRequest: (request) =>
+          request.method === "server/defect"
+            ? Effect.die("handler defect")
+            : request.method === "server/invalid-result"
+              ? Effect.succeed(1n)
+              : Deferred.succeed(requestStarted, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseRequest)),
+                  Effect.as({ accepted: true }),
+                ),
+        onNotification: () => Deferred.succeed(notificationReceived, undefined).pipe(Effect.asVoid),
+      });
+
+      const pendingClientRequest = yield* transport
+        .request("client/request", {})
+        .pipe(Effect.forkScoped);
+      assert.deepEqual(yield* decodeJson(yield* Queue.take(output)), {
+        id: 1,
+        method: "client/request",
+        params: {},
+      });
+      yield* Queue.offer(input, encodeJsonl({ id: 41, method: "server/request" }));
+      yield* Deferred.await(requestStarted);
+      yield* Queue.offer(input, encodeJsonl({ method: "server/notification" }));
+      yield* Queue.offer(input, encodeJsonl({ id: 1, result: { completed: true } }));
+
+      yield* Deferred.await(notificationReceived);
+      assert.deepEqual(yield* Fiber.join(pendingClientRequest), { completed: true });
+
+      yield* Deferred.succeed(releaseRequest, undefined);
+      assert.deepEqual(yield* decodeJson(yield* Queue.take(output)), {
+        id: 41,
+        result: { accepted: true },
+      });
+
+      yield* Queue.offer(input, encodeJsonl({ id: 42, method: "server/defect" }));
+      assert.deepEqual(yield* decodeJson(yield* Queue.take(output)), {
+        id: 42,
+        error: {
+          code: -32603,
+          message: "Codex App Server request handler failed for method 'server/defect'",
+        },
+      });
+
+      yield* Queue.offer(input, encodeJsonl({ id: 43, method: "server/invalid-result" }));
+      assert.deepEqual(yield* decodeJson(yield* Queue.take(output)), {
+        id: 43,
+        error: {
+          code: -32603,
+          message: "Codex App Server request handler failed for method 'server/invalid-result'",
+        },
+      });
+    }),
+  );
+
   it.effect("surfaces JSON encoding failures as protocol parse errors", () =>
     Effect.gen(function* () {
       const { stdio } = yield* makeInMemoryStdio();
